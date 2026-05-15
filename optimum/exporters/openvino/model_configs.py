@@ -145,6 +145,8 @@ from ...intel.utils.import_utils import (
 )
 from .model_patcher import (
     AfmoeModelPatcher,
+    AnimaTransformerModelPatcher,
+    AnimaVAEPatcher,
     AquilaModelPatcher,
     ArcticModelPatcher,
     BaichuanModelPatcher,
@@ -2963,6 +2965,209 @@ class LTXVideoTransformerOpenVINOConfig(SanaTransformerOpenVINOConfig):
     def outputs(self) -> Dict[str, Dict[int, str]]:
         return {
             "out_sample": {0: "batch_size", 1: "video_sequence_length"},
+        }
+
+
+class DummyAnimaAdapterInputGenerator(DummySeq2SeqDecoderTextInputGenerator):
+    """Generates float hidden states for the LLM Adapter."""
+
+    SUPPORTED_INPUT_NAMES = ("hidden_states",)
+
+    def generate(self, input_name: str, framework: str = "pt", int_dtype: str = "int64", float_dtype: str = "fp32"):
+        if input_name == "hidden_states":
+            shape = [self.batch_size, self.sequence_length, self.normalized_config.hidden_size]
+            return self.random_float_tensor(shape, framework=framework, dtype=float_dtype)
+        return super().generate(input_name, framework, int_dtype, float_dtype)
+
+
+class AnimaVaeDummyInputGenerator(DummyVisionInputGenerator):
+    """Generates 5D tensors for the Anima 3D VAE [B, C, T, H, W]."""
+
+    SUPPORTED_INPUT_NAMES = ("sample", "latent_sample")
+
+    def __init__(
+        self,
+        task: str,
+        normalized_config,
+        batch_size: int = 1,
+        num_channels: int = 3,
+        width: int = 64,
+        height: int = 64,
+        num_frames: int = 2,
+        **kwargs,
+    ):
+        super().__init__(task, normalized_config, batch_size, num_channels, width, height, **kwargs)
+        self.num_frames = num_frames
+
+    def generate(self, input_name: str, framework: str = "pt", int_dtype: str = "int64", float_dtype: str = "fp32"):
+        if input_name == "sample":
+            # Pixel space: [B, 3, T, H, W]
+            return self.random_float_tensor(
+                [self.batch_size, self.num_channels, self.num_frames, self.height, self.width],
+                framework=framework,
+                dtype=float_dtype,
+            )
+        if input_name == "latent_sample":
+            # Latent space: [B, 16, T, H/8, W/8]
+            latent_channels = getattr(self.normalized_config, "latent_channels", 16)
+            return self.random_float_tensor(
+                [self.batch_size, latent_channels, self.num_frames, self.height // 8, self.width // 8],
+                framework=framework,
+                dtype=float_dtype,
+            )
+        return super().generate(input_name, framework, int_dtype, float_dtype)
+
+
+class DummyAnimaTransformerInputGenerator(DummyVisionInputGenerator):
+    """Input generator for Anima/Cosmos 3D coordinate tensors."""
+
+    SUPPORTED_INPUT_NAMES = ("hidden_states", "encoder_hidden_states", "img_ids", "txt_ids")
+
+    def __init__(
+        self,
+        task: str,
+        normalized_config,
+        batch_size: int = 1,
+        num_channels: int = 16,
+        width: int = 64,
+        height: int = 64,
+        num_frames: int = 2,
+        **kwargs,
+    ):
+        super().__init__(task, normalized_config, batch_size, num_channels, width, height, **kwargs)
+        self.num_frames = num_frames if num_frames > 0 else 1
+
+    def generate(self, input_name: str, framework: str = "pt", int_dtype: str = "int64", float_dtype: str = "fp32"):
+        latent_h, latent_w = self.height // 16, self.width // 16
+        num_patches = self.num_frames * latent_h * latent_w
+
+        if input_name == "hidden_states":
+            return self.random_float_tensor(
+                [self.batch_size, num_patches, getattr(self.normalized_config, "hidden_size", 1152)],
+                framework=framework,
+                dtype=float_dtype,
+            )
+
+        if input_name == "encoder_hidden_states":
+            return self.random_float_tensor(
+                [self.batch_size, 512, getattr(self.normalized_config, "text_encoder_projection_dim", 1152)],
+                framework=framework,
+                dtype=float_dtype,
+            )
+
+        if input_name == "img_ids":
+            img_ids = torch.zeros((num_patches, 3), dtype=torch.float32)
+            if is_diffusers_version(">=", "0.31.0"):
+                img_ids = img_ids.unsqueeze(0).repeat(self.batch_size, 1, 1)
+            return img_ids
+
+        if input_name == "txt_ids":
+            txt_ids = torch.zeros((512, 3), dtype=torch.float32)
+            if is_diffusers_version(">=", "0.31.0"):
+                txt_ids = txt_ids.unsqueeze(0).repeat(self.batch_size, 1, 1)
+            return txt_ids
+
+        return super().generate(input_name, framework, int_dtype, float_dtype)
+
+
+@register_in_tasks_manager("anima-transformer-3d", *["feature-extraction"], library_name="diffusers")
+class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
+    """Config for Anima 3D Transformer export."""
+
+    DUMMY_INPUT_GENERATOR_CLASSES = (
+        DummyTransformerTimestpsInputGenerator,
+        DummyAnimaTransformerInputGenerator,
+        DummyFluxTextInputGenerator,
+    )
+    _MODEL_PATCHER = AnimaTransformerModelPatcher
+
+    @property
+    def inputs(self) -> Dict[str, Dict[int, str]]:
+        return {
+            "hidden_states": {0: "batch_size", 1: "sequence_length"},
+            "timestep": {0: "batch_size"},
+            "guidance": {0: "batch_size"},
+            "encoder_hidden_states": {0: "batch_size", 1: "encoder_sequence_length"},
+            "img_ids": {0: "batch_size", 1: "sequence_length"} if self.is_dynamic else {0: "sequence_length"},
+            "txt_ids": {0: "batch_size", 1: "encoder_sequence_length"}
+            if self.is_dynamic
+            else {0: "encoder_sequence_length"},
+        }
+
+    @property
+    def outputs(self) -> Dict[str, Dict[int, str]]:
+        return {"sample": {0: "batch_size", 1: "sequence_length"}}
+
+
+@register_in_tasks_manager("anima-llm-adapter", *["feature-extraction"], library_name="diffusers")
+class AnimaLLMAdapterOpenVINOConfig(OnnxConfig):
+    """Config for Anima LLM Adapter export."""
+
+    DUMMY_INPUT_GENERATOR_CLASSES = (DummyAnimaAdapterInputGenerator,)
+    NORMALIZED_CONFIG_CLASS = NormalizedConfig
+
+    @property
+    def inputs(self) -> Dict[str, Dict[int, str]]:
+        return {
+            "hidden_states": {0: "batch_size", 1: "sequence_length"},
+        }
+
+    @property
+    def outputs(self) -> Dict[str, Dict[int, str]]:
+        return {"sample": {0: "batch_size", 1: "sequence_length"}}
+
+
+@register_in_tasks_manager("anima-vae-decoder", *["feature-extraction"], library_name="diffusers")
+class AnimaVaeDecoderOpenVINOConfig(VaeDecoderOnnxConfig):
+    """Config for Anima 5D VAE Decoder export."""
+
+    DUMMY_INPUT_GENERATOR_CLASSES = (AnimaVaeDummyInputGenerator,)
+    _MODEL_PATCHER = AnimaVAEPatcher
+
+    @property
+    def inputs(self) -> Dict[str, Dict[int, str]]:
+        return {
+            "latent_sample": {
+                0: "batch_size",
+                2: "num_frames",
+                3: "latent_height",
+                4: "latent_width",
+            }
+        }
+
+    @property
+    def outputs(self) -> Dict[str, Dict[int, str]]:
+        return {
+            "sample": {
+                0: "batch_size",
+                2: "num_frames",
+                3: "height",
+                4: "width",
+            }
+        }
+
+
+@register_in_tasks_manager("anima-vae-encoder", *["feature-extraction"], library_name="diffusers")
+class AnimaVaeEncoderOpenVINOConfig(VaeEncoderOnnxConfig):
+    """Config for Anima 5D VAE Encoder export."""
+
+    DUMMY_INPUT_GENERATOR_CLASSES = (AnimaVaeDummyInputGenerator,)
+
+    @property
+    def inputs(self) -> Dict[str, Dict[int, str]]:
+        return {
+            "sample": {
+                0: "batch_size",
+                2: "num_frames",
+                3: "height",
+                4: "width",
+            }
+        }
+
+    @property
+    def outputs(self) -> Dict[str, Dict[int, str]]:
+        return {
+            "latent_parameters": {0: "batch_size", 2: "num_frames", 3: "latent_height", 4: "latent_width"}
         }
 
 

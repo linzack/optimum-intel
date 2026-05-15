@@ -110,8 +110,9 @@ else:
     FluxInpaintPipeline = object
 
 if is_diffusers_version(">=", "0.32.0"):
-    from diffusers import FluxFillPipeline, SanaPipeline
+    from diffusers import AnimaTextToImagePipeline, FluxFillPipeline, SanaPipeline
 else:
+    AnimaTextToImagePipeline = object
     FluxFillPipeline = object
     SanaPipeline = object
 
@@ -1663,6 +1664,100 @@ class OVLTXPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, LTXPipel
     auto_model_class = LTXPipeline
 
 
+class OVModelLLMAdapter(OVPipelinePart):
+    """OpenVINO wrapper for Anima LLM Adapter."""
+
+    def forward(self, hidden_states: torch.Tensor):
+        self.compile()
+        inputs = {"hidden_states": hidden_states}
+        outputs = self.request(inputs, share_inputs=True)
+        return torch.from_numpy(outputs[0])
+
+
+class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaTextToImagePipeline):
+    """OpenVINO implementation of the Anima Text-to-Video pipeline."""
+
+    auto_model_class = AnimaTextToImagePipeline
+    main_input_name = "prompt"
+    export_feature = "text-to-video"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # True Dynamic Wrapping (Monkey-patching) to preserve state
+        if hasattr(self, "transformer") and getattr(self.transformer, "_rank_corrected", False) is False:
+            original_forward = self.transformer.forward
+
+            def rank_corrected_forward(*f_args, **f_kwargs):
+                for id_name in ["img_ids", "txt_ids"]:
+                    if id_name in f_kwargs and f_kwargs[id_name] is not None:
+                        tensor = f_kwargs[id_name]
+                        try:
+                            model_obj = self.transformer.request.model if self.transformer.request else self.transformer.model
+                            expected_rank = model_obj.input(id_name).partial_shape.rank.get_length()
+                            if tensor.ndim < expected_rank:
+                                f_kwargs[id_name] = tensor.unsqueeze(0)
+                            elif tensor.ndim > expected_rank:
+                                f_kwargs[id_name] = tensor.squeeze(0)
+                        except Exception:
+                            pass
+                return original_forward(*f_args, **f_kwargs)
+
+            self.transformer.forward = rank_corrected_forward
+            self.transformer._rank_corrected = True
+
+    def _reshape_transformer(
+        self, model: openvino.Model, batch_size, height, width, num_images_per_prompt, num_frames=1
+    ):
+        # Anima/Cosmos specific coordinate generation logic
+        shapes = {}
+        batch_size *= num_images_per_prompt
+        # Anima 5D VAE compression is 8x8x8
+        height //= 8
+        width //= 8
+        num_frames = (num_frames - 1) // 8 + 1
+        packed_height_width = height * width * num_frames
+
+        for inputs in model.inputs:
+            name = inputs.get_any_name()
+            if name == "img_ids":
+                shapes[inputs] = [packed_height_width, 3]
+            elif name == "txt_ids":
+                shapes[inputs] = [-1, 3]
+            else:
+                shapes[inputs] = inputs.get_partial_shape()
+                shapes[inputs][0] = batch_size
+        model.reshape(shapes)
+        return model
+
+    def _reshape_vae_decoder(
+        self,
+        model: openvino.Model,
+        height: int = -1,
+        width: int = -1,
+        num_images_per_prompt: int = -1,
+        num_frames: int = -1,
+    ):
+        # Force 5D shape for Anima VAE (Batch, Channels, Time, Height, Width)
+        latent_channels = self.vae_decoder.config.get("latent_channels", 16)
+        h = height // 8 if height > 0 else -1
+        w = width // 8 if width > 0 else -1
+        t = (num_frames - 1) // 8 + 1 if num_frames > 0 else -1
+        shapes = {model.inputs[0]: [num_images_per_prompt, latent_channels, t, h, w]}
+        model.reshape(shapes)
+        return model
+
+    @classmethod
+    def from_pretrained(cls, model_id, **kwargs):
+        pipeline = super().from_pretrained(model_id, **kwargs)
+        adapter_path = Path(model_id) / "llm_adapter" / "openvino_model.xml"
+        if adapter_path.exists():
+            ov_model = core.read_model(adapter_path)
+            pipeline.llm_adapter = OVModelLLMAdapter(ov_model, pipeline, "llm_adapter")
+            pipeline._internal_dict["llm_adapter"] = ("optimum", "OVModelLLMAdapter")
+        return pipeline
+
+
 SUPPORTED_OV_PIPELINES = [
     OVStableDiffusionPipeline,
     OVStableDiffusionImg2ImgPipeline,
@@ -1742,6 +1837,9 @@ if is_diffusers_version(">=", "0.32.0"):
     SUPPORTED_OV_PIPELINES.append(OVFluxFillPipeline)
     OV_TEXT2IMAGE_PIPELINES_MAPPING["sana"] = OVSanaPipeline
     SUPPORTED_OV_PIPELINES.append(OVSanaPipeline)
+    # Add Anima
+    SUPPORTED_OV_PIPELINES.append(OVAnimaPipeline)
+    OV_TEXT2VIDEO_PIPELINES_MAPPING["anima"] = OVAnimaPipeline
 
 
 if is_diffusers_version(">=", "0.33.0"):

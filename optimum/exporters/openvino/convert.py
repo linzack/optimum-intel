@@ -25,6 +25,7 @@ from packaging.version import Version
 from transformers.generation import GenerationMixin
 from transformers.models.speecht5.modeling_speecht5 import SpeechT5HifiGan
 from transformers.utils import is_torch_available
+from transformers import PretrainedConfig
 
 from openvino import Model, save_model
 from openvino.exceptions import OVTypeError
@@ -1121,6 +1122,13 @@ def _get_submodels_and_export_configs(
 def get_diffusion_models_for_export_ext(
     pipeline: "DiffusionPipeline", int_dtype: str = "int64", float_dtype: str = "fp32", exporter: str = "openvino"
 ):
+    is_anima = (
+        pipeline.__class__.__name__.startswith("Anima")
+        or (pipeline.__class__.__name__.startswith("Cosmos") and hasattr(pipeline, "llm_adapter"))
+    )
+    if is_anima:
+        return get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype)
+
     is_sdxl = pipeline.__class__.__name__.startswith("StableDiffusionXL")
     is_sd3 = pipeline.__class__.__name__.startswith("StableDiffusion3")
     is_flux = pipeline.__class__.__name__.startswith("Flux")
@@ -1563,3 +1571,195 @@ def _get_speecht5_tss_model_for_export(
     stateful_per_model = [False, True, False, False]
 
     return export_config, models_for_export, stateful_per_model
+
+
+def _resolve_anima_text_encoder_model_type(text_encoder, default_model_type: str, tokenizer=None) -> str:
+    config = getattr(text_encoder, "config", None)
+    if config is not None and not isinstance(config, PretrainedConfig) and hasattr(config, "to_dict"):
+        from transformers import AutoConfig
+
+        config = AutoConfig.for_model(config.model_type, **config.to_dict())
+
+    model_type = str(getattr(config, "model_type", "") or "").lower()
+    architectures = [str(x) for x in (getattr(config, "architectures", []) or [])]
+    encoder_cls_name = text_encoder.__class__.__name__
+    tokenizer_cls_name = tokenizer.__class__.__name__ if tokenizer is not None else ""
+
+    looks_like_qwen = (
+        model_type in {"qwen", "qwen2", "qwen2_5", "qwen2_5_vl"}
+        or any("Qwen" in arch for arch in architectures)
+        or "Qwen" in encoder_cls_name
+        or "Qwen" in tokenizer_cls_name
+    )
+    if looks_like_qwen:
+        return "qwen2_5_vl_text"
+
+    return default_model_type
+
+
+def _add_anima_text_encoder_for_export(
+    models_for_export,
+    model_key: str,
+    text_encoder,
+    tokenizer,
+    default_model_type: str,
+    exporter: str,
+    int_dtype: str,
+    float_dtype: str,
+):
+    if text_encoder is None:
+        return
+
+    text_encoder_for_export = text_encoder
+    if "CausalLM" in text_encoder.__class__.__name__ and hasattr(text_encoder, "model"):
+        text_encoder_for_export = text_encoder.model
+
+    text_encoder_model_type = _resolve_anima_text_encoder_model_type(
+        text_encoder,
+        default_model_type,
+        tokenizer,
+    )
+
+    if hasattr(text_encoder_for_export, "config"):
+        text_encoder_for_export.config.output_hidden_states = True
+        text_encoder_for_export.config.return_dict = True
+
+    export_config_constructor = TasksManager.get_exporter_config_constructor(
+        model=text_encoder_for_export,
+        exporter=exporter,
+        library_name="diffusers",
+        task="feature-extraction",
+        model_type=text_encoder_model_type,
+    )
+    export_config = export_config_constructor(
+        text_encoder_for_export.config,
+        int_dtype=int_dtype,
+        float_dtype=float_dtype,
+    )
+
+    models_for_export[model_key] = (text_encoder_for_export, export_config)
+
+
+def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype):
+    import copy
+
+    models_for_export = {}
+
+    # 1. Text Encoder (Qwen3-0.6B)
+    _add_anima_text_encoder_for_export(
+        models_for_export=models_for_export,
+        model_key="text_encoder",
+        text_encoder=getattr(pipeline, "text_encoder", None),
+        tokenizer=getattr(pipeline, "tokenizer", None),
+        default_model_type="qwen3-text-encoder",
+        exporter=exporter,
+        int_dtype=int_dtype,
+        float_dtype=float_dtype,
+    )
+
+    # 2. Tokenizers (Handle secondary T5 tokenizer)
+    if hasattr(pipeline, "t5_tokenizer") and not hasattr(pipeline, "tokenizer_2"):
+        pipeline.tokenizer_2 = pipeline.t5_tokenizer
+
+    # 2b. LLM Adapter (Linear)
+    llm_adapter = getattr(pipeline, "llm_adapter", None)
+    if llm_adapter is not None:
+        # Handle missing config with a stub to avoid TasksManager failure
+        adapter_config = getattr(llm_adapter, "config", PretrainedConfig())
+        export_config_constructor = TasksManager.get_exporter_config_constructor(
+            model=llm_adapter,
+            exporter=exporter,
+            library_name="diffusers",
+            task="feature-extraction",
+            model_type="anima-llm-adapter",
+        )
+        models_for_export["llm_adapter"] = (
+            llm_adapter,
+            export_config_constructor(adapter_config, int_dtype=int_dtype, float_dtype=float_dtype),
+        )
+
+    # 3. Transformer (Anima DiT / MiniTrainDIT)
+    transformer = getattr(pipeline, "transformer", None)
+    if transformer is not None:
+        # Patch projection dimensions for IR compatibility
+        transformer.config.text_encoder_projection_dim = getattr(
+            transformer.config,
+            "joint_attention_dim",
+            getattr(transformer.config, "cross_attention_dim", getattr(transformer.config, "hidden_size", 1152)),
+        )
+        transformer.config.time_cond_proj_dim = None
+        export_config_constructor = TasksManager.get_exporter_config_constructor(
+            model=transformer,
+            exporter=exporter,
+            library_name="diffusers",
+            task="feature-extraction",
+            model_type="anima-transformer-3d",
+        )
+        export_config = export_config_constructor(transformer.config, int_dtype=int_dtype, float_dtype=float_dtype)
+        export_config.runtime_options = {"ACTIVATIONS_SCALE_FACTOR": "8.0"}
+        models_for_export["transformer"] = (transformer, export_config)
+
+    # 4. VAE Encoder & Decoder (WanVAE 3D Causal)
+    vae = getattr(pipeline, "vae", None)
+    if vae is not None:
+        # 4a. Decoder with normalization constants
+        vae_decoder = copy.deepcopy(vae)
+        vae_decoder.forward = lambda latent_sample: vae_decoder.decode(z=latent_sample)
+        vae_decoder.config.latents_mean_data = [
+            -0.7571,
+            -0.7089,
+            -0.9113,
+            0.1075,
+            -0.1745,
+            0.9653,
+            -0.1517,
+            1.5508,
+            0.4134,
+            -0.0715,
+            0.5517,
+            -0.3632,
+            -0.1922,
+            -0.9497,
+            0.2503,
+            -0.2921,
+        ]
+        vae_decoder.config.latents_std_data = [
+            2.8184,
+            1.4541,
+            2.3275,
+            2.6558,
+            1.2196,
+            1.7708,
+            2.6052,
+            2.0743,
+            3.2687,
+            2.1526,
+            2.8652,
+            1.5579,
+            1.6382,
+            1.1253,
+            2.8251,
+            1.9160,
+        ]
+
+        # 4b. Encoder
+        vae_encoder = copy.deepcopy(vae)
+        vae_encoder.forward = lambda sample: vae_encoder.encode(x=sample)
+
+        for component, model_obj, task, model_type in [
+            ("vae_encoder", vae_encoder, "feature-extraction", "anima-vae-encoder"),
+            ("vae_decoder", vae_decoder, "feature-extraction", "anima-vae-decoder"),
+        ]:
+            export_config_constructor = TasksManager.get_exporter_config_constructor(
+                model=model_obj,
+                exporter=exporter,
+                library_name="diffusers",
+                task=task,
+                model_type=model_type,
+            )
+            models_for_export[component] = (
+                model_obj,
+                export_config_constructor(model_obj.config, int_dtype=int_dtype, float_dtype=float_dtype),
+            )
+
+    return models_for_export

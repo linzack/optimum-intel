@@ -24,6 +24,78 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Un
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+
+def apply_rotary_emb_qwen(
+    x: torch.Tensor,
+    freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
+    use_real: bool = True,
+    use_real_unbind_dim: int = -1,
+) -> torch.Tensor:
+    """Apply rotary embeddings to input tensors using the given frequency tensor."""
+    if use_real:
+        cos, sin = freqs_cis  # [S, D]
+        # Reshape for broadcasting: [S, D] -> [1, S, 1, D] to match x shape [B, S, H, D]
+        cos = cos[None, :, None, :]
+        sin = sin[None, :, None, :]
+        cos, sin = cos.to(x.device), sin.to(x.device)
+
+        if use_real_unbind_dim == -1:
+            x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)
+            x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
+        elif use_real_unbind_dim == -2:
+            # Correct unbind dimension for Anima/Cosmos
+            x_real, x_imag = x.reshape(*x.shape[:-1], 2, -1).unbind(-2)
+            x_rotated = torch.cat([-x_imag, x_real], dim=-1)
+        else:
+            raise ValueError(f"use_real_unbind_dim={use_real_unbind_dim} but should be -1 or -2.")
+
+        out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
+        return out
+    else:
+        x_rotated = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
+        freqs_cis = freqs_cis.unsqueeze(1)
+        x_out = torch.view_as_real(x_rotated * freqs_cis).flatten(3)
+        return x_out.type_as(x)
+
+
+class AnimaEmbedRope(nn.Module):
+    """Implementation of 3D-RoPE for Anima/Cosmos."""
+
+    def __init__(self, head_dim: int, theta: float = 10000.0):
+        super().__init__()
+        self.head_dim = head_dim
+        self.theta = theta
+        self.dim_h = (head_dim // 6) * 2
+        self.dim_w = self.dim_h
+        self.dim_t = head_dim - (self.dim_h + self.dim_w)
+
+    def forward(self, q, k, img_ids, txt_ids):
+        # Note: `txt_ids` is intentionally ignored. In Cosmos/Anima architecture,
+        # text tokens do not receive spatial 3D-RoPE embeddings. They rely on
+        # absolute embeddings applied earlier in the text encoder stream.
+
+        def get_cos_sin(ids, dim):
+            inv_freq = 1.0 / (self.theta ** (torch.arange(0, dim, 2).float() / dim))
+            freqs = torch.einsum("...i,j->...ij", ids.float(), inv_freq.to(ids.device))
+            cos = freqs.cos().repeat_interleave(2, dim=-1)
+            sin = freqs.sin().repeat_interleave(2, dim=-1)
+            return cos, sin
+
+        # ids shape: [S, 3] -> (T, H, W)
+        t_ids, h_ids, w_ids = img_ids.unbind(-1)
+        cos_t, sin_t = get_cos_sin(t_ids.unsqueeze(-1), self.dim_t)
+        cos_h, sin_h = get_cos_sin(h_ids.unsqueeze(-1), self.dim_h)
+        cos_w, sin_w = get_cos_sin(w_ids.unsqueeze(-1), self.dim_w)
+
+        # Concatenation order: (H, W, T)
+        cos = torch.cat((cos_h, cos_w, cos_t), dim=-1)
+        sin = torch.cat((sin_h, sin_w, sin_t), dim=-1)
+
+        # Apply Rotary Embeddings (use_real_unbind_dim=-2)
+        q = apply_rotary_emb_qwen(q, (cos, sin), use_real=True, use_real_unbind_dim=-2)
+        k = apply_rotary_emb_qwen(k, (cos, sin), use_real=True, use_real_unbind_dim=-2)
+        return q, k
 from transformers.cache_utils import Cache, DynamicCache, EncoderDecoderCache
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation import GenerationMixin
@@ -9792,3 +9864,80 @@ class KokoroModelPatcher(ModelPatcher):
     def __exit__(self, exc_type, exc_value, traceback):
         super().__exit__(exc_type, exc_value, traceback)
         self._model.forward = self._model._orig_forward
+
+
+class AnimaTransformerModelPatcher(ModelPatcher):
+    """Context manager to patch Anima Transformer for OpenVINO export."""
+
+    def __enter__(self):
+        super().__enter__()
+        self.original_processors = {}
+        for name, module in self._model.named_modules():
+            if "attn" in name and hasattr(module, "processor"):
+                self.original_processors[name] = module.processor
+                is_cross = "attn2" in name
+                module.processor = AnimaAttentionProcessor(self._model.config.head_dim, is_cross=is_cross)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        super().__exit__(exc_type, exc_val, exc_tb)
+        for name, processor in self.original_processors.items():
+            self._model.get_submodule(name).processor = processor
+
+
+class AnimaAttentionProcessor(nn.Module):
+    """Attention processor for Anima/Cosmos (handles self and cross)."""
+
+    def __init__(self, head_dim: int, is_cross: bool = False):
+        super().__init__()
+        self.head_dim = head_dim
+        self.is_cross = is_cross
+        self.rope = AnimaEmbedRope(head_dim)
+
+    def __call__(self, attn, hidden_states, encoder_hidden_states=None, **kwargs):
+        batch_size = hidden_states.shape[0]
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(encoder_hidden_states if self.is_cross else hidden_states)
+        value = attn.to_v(encoder_hidden_states if self.is_cross else hidden_states)
+
+        def reshape_heads(x):
+            return x.view(batch_size, -1, attn.heads, self.head_dim)
+
+        query, key, value = map(reshape_heads, (query, key, value))
+
+        if not self.is_cross:
+            img_ids = kwargs.get("img_ids")
+            txt_ids = kwargs.get("txt_ids")
+            query, key = self.rope(query, key, img_ids, txt_ids)
+
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+
+        hidden_states = F.scaled_dot_product_attention(query, key, value)
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * self.head_dim)
+        hidden_states = attn.to_out[0](hidden_states)
+        return hidden_states
+
+
+class AnimaVAEPatcher(ModelPatcher):
+    """Context manager for Anima 3D VAE patching (WanVAE_)."""
+
+    def __enter__(self):
+        super().__enter__()
+        for name, module in self._model.named_modules():
+            if "upsample" in name.lower() or "resample" in name.lower():
+                if hasattr(module, "mode"):
+                    module._original_mode = module.mode
+                    module.mode = "nearest"
+                elif hasattr(module, "interpolation_mode"):
+                    module._original_mode = module.interpolation_mode
+                    module.interpolation_mode = "nearest"
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        super().__exit__(exc_type, exc_value, traceback)
+        for name, module in self._model.named_modules():
+            if hasattr(module, "_original_mode"):
+                setattr(module, "mode" if hasattr(module, "mode") else "interpolation_mode", module._original_mode)
+                del module._original_mode
