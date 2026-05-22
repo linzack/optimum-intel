@@ -209,6 +209,7 @@ def _infer_library_from_model_or_model_class(
     model: Union["PreTrainedModel", "ModelMixin", "DiffusionPipeline"],
     library_name: Optional[str] = None,
 ):
+    print(f"DEBUG: _infer_library_from_model_or_model_class model={type(model)}, module={model.__module__}", flush=True)
     if library_name is not None:
         return library_name
     if model.__module__.startswith("open_clip"):

@@ -567,6 +567,10 @@ def main_export(
             model_name_or_path, subfolder=subfolder, trust_remote_code=trust_remote_code, model_type=model_type
         )
 
+        model_kwargs = model_kwargs or {}
+        if "model_name_or_path" not in model_kwargs:
+            model_kwargs["model_name_or_path"] = model_name_or_path
+
         submodel_paths = export_from_model(
             model=model,
             output=output,
@@ -580,6 +584,7 @@ def main_export(
             device=device,
             trust_remote_code=trust_remote_code,
             patch_16bit_model=patch_16bit,
+            library_name=library_name,
             **kwargs_shapes,
         )
 

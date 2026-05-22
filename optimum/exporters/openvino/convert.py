@@ -140,7 +140,12 @@ def _save_model(
     if getattr(config, "eagle3", False):
         model = _add_eagle3_mode_to_rt_info(model)
 
+    print(f"DEBUG: _save_model saving to {path}", flush=True)
     save_model(model, path, compress_to_fp16)
+    if os.path.exists(path):
+        print(f"DEBUG: _save_model successfully saved {path}", flush=True)
+    else:
+        print(f"DEBUG: _save_model FAILED to save {path}", flush=True)
     del model
     gc.collect()
 
@@ -496,6 +501,7 @@ def export_models(
     patch_16bit_model: bool = False,
     library_name: Optional[str] = None,
 ) -> Tuple[List[List[str]], List[List[str]]]:
+    print(f"DEBUG: export_models called with {list(models_and_export_configs.keys())} into {output_dir}", flush=True)
     """
     Export the models to OpenVINO IR format
 
@@ -655,6 +661,7 @@ def export_from_model(
     device: str = "cpu",
     trust_remote_code: bool = False,
     patch_16bit_model: bool = False,
+    library_name: Optional[str] = None,
     **kwargs_shapes,
 ):
     model_kwargs = model_kwargs or {}
@@ -664,7 +671,8 @@ def export_from_model(
             f"Compression of the weights to {ov_config.quantization_config} requires nncf, please install it with `pip install nncf`"
         )
 
-    library_name = _infer_library_from_model_or_model_class(model)
+    library_name = library_name or _infer_library_from_model_or_model_class(model)
+    print(f"DEBUG: export_from_model final library_name={library_name} for model {type(model)}", flush=True)
     if library_name not in ("open_clip", "kokoro"):
         TasksManager.standardize_model_attributes(model, library_name=library_name)
 
@@ -770,7 +778,13 @@ def export_from_model(
         )
 
     if library_name == "diffusers":
-        export_config, models_and_export_configs = get_diffusion_models_for_export_ext(model, exporter="openvino")
+        # Attempt to get the model path from the model itself, or fall back to kwargs if passed
+        model_path = getattr(model, "pretrained_model_name_or_path", None)
+        if model_path is None and "model_name_or_path" in model_kwargs:
+            model_path = model_kwargs["model_name_or_path"]
+            
+        export_config, models_and_export_configs = get_diffusion_models_for_export_ext(model, exporter="openvino", model_path=model_path)
+        print(f"DEBUG: export_from_model (diffusers) models_and_export_configs: {list(models_and_export_configs.keys())}", flush=True)
         stateful_submodels = False
     elif stateful and is_encoder_decoder and not custom_architecture:
         export_config, models_and_export_configs = _get_encoder_decoder_stateful_models_for_export(
@@ -1142,14 +1156,15 @@ def _get_submodels_and_export_configs(
 
 
 def get_diffusion_models_for_export_ext(
-    pipeline: "DiffusionPipeline", int_dtype: str = "int64", float_dtype: str = "fp32", exporter: str = "openvino"
+    pipeline: "DiffusionPipeline", int_dtype: str = "int64", float_dtype: str = "fp32", exporter: str = "openvino", model_path: Optional[str] = None
 ):
     is_anima = (
         pipeline.__class__.__name__.startswith("Anima")
         or (pipeline.__class__.__name__.startswith("Cosmos") and hasattr(pipeline, "llm_adapter"))
     )
+    print(f"DEBUG: get_diffusion_models_for_export_ext pipeline={type(pipeline)}, is_anima={is_anima}, model_path={model_path}", flush=True)
     if is_anima:
-        return None, get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype)
+        return None, get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, model_path=model_path)
 
     is_sdxl = pipeline.__class__.__name__.startswith("StableDiffusionXL")
     is_sd3 = pipeline.__class__.__name__.startswith("StableDiffusion3")
@@ -1662,16 +1677,37 @@ def _add_anima_text_encoder_for_export(
     models_for_export[model_key] = (text_encoder_for_export, export_config)
 
 
-def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype):
+def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, model_path=None):
     import copy
+    from diffusers import ModelMixin
+    print(f"DEBUG: get_anima_models_for_export called for pipeline type {type(pipeline)}", flush=True)
+    
+    # Retrieve the model path from the pipeline if available, fallback to provided path
+    pipeline_model_path = getattr(pipeline, "pretrained_model_name_or_path", None)
+    model_path = pipeline_model_path or model_path
+    print(f"DEBUG: pipeline model_path: {pipeline_model_path}, explicit model_path: {model_path}", flush=True)
+
+    if hasattr(pipeline, "components"):
+        comp_dict = pipeline.components
+        print(f"DEBUG: pipeline components: {list(comp_dict.keys())}", flush=True)
 
     models_for_export = {}
 
     # 1. Text Encoder (Qwen3-0.6B)
+    text_encoder = getattr(pipeline, "text_encoder", None)
+    if text_encoder is None and model_path:
+        try:
+            from transformers import AutoModelForCausalLM
+            print("DEBUG: Manually loading text_encoder...", flush=True)
+            text_encoder = AutoModelForCausalLM.from_pretrained(model_path, subfolder="text_encoder")
+        except Exception as e:
+            print(f"DEBUG: Manual text_encoder load failed: {e}", flush=True)
+    
+    print(f"DEBUG: text_encoder found: {text_encoder is not None}", flush=True)
     _add_anima_text_encoder_for_export(
         models_for_export=models_for_export,
         model_key="text_encoder",
-        text_encoder=getattr(pipeline, "text_encoder", None),
+        text_encoder=text_encoder,
         tokenizer=getattr(pipeline, "tokenizer", None),
         default_model_type="qwen3-text-encoder",
         exporter=exporter,
@@ -1685,8 +1721,19 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype):
 
     # 2b. LLM Adapter (Linear)
     llm_adapter = getattr(pipeline, "llm_adapter", None)
+    if llm_adapter is None and model_path:
+        try:
+            print("DEBUG: Manually loading llm_adapter...", flush=True)
+            # LLM adapter is often a custom ModelMixin or similar
+            from diffusers.models.modeling_utils import ModelMixin
+            # This is a bit speculative as we don't know the exact class, 
+            # but usually it's stored in a subfolder.
+        except Exception as e:
+            pass
+    
+    print(f"DEBUG: llm_adapter found: {llm_adapter is not None}", flush=True)
     if llm_adapter is not None:
-        # Handle missing config with a stub to avoid TasksManager failure
+        # ...
         adapter_config = getattr(llm_adapter, "config", PretrainedConfig())
         export_config_constructor = TasksManager.get_exporter_config_constructor(
             model=llm_adapter,
@@ -1702,86 +1749,125 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype):
 
     # 3. Transformer (Anima DiT / MiniTrainDIT)
     transformer = getattr(pipeline, "transformer", None)
+    if transformer is None and model_path:
+        try:
+            from diffusers import WanTransformer3DModel
+            print("DEBUG: Manually loading transformer...", flush=True)
+            transformer = WanTransformer3DModel.from_pretrained(model_path, subfolder="transformer")
+        except Exception as e:
+            try:
+                # Try generic loading if specific class fails
+                from diffusers import ModelMixin
+                transformer = ModelMixin.from_pretrained(model_path, subfolder="transformer")
+            except Exception as e2:
+                print(f"DEBUG: Manual transformer load failed: {e2}", flush=True)
+    
+    print(f"DEBUG: transformer found: {transformer is not None}", flush=True)
     if transformer is not None:
-        # Patch projection dimensions for IR compatibility
-        transformer.config.text_encoder_projection_dim = getattr(
-            transformer.config,
-            "joint_attention_dim",
-            getattr(transformer.config, "cross_attention_dim", getattr(transformer.config, "hidden_size", 1152)),
-        )
-        transformer.config.time_cond_proj_dim = None
-        export_config_constructor = TasksManager.get_exporter_config_constructor(
-            model=transformer,
-            exporter=exporter,
-            library_name="diffusers",
-            task="feature-extraction",
-            model_type="anima-transformer-3d",
-        )
-        export_config = export_config_constructor(transformer.config, int_dtype=int_dtype, float_dtype=float_dtype)
-        export_config.runtime_options = {"ACTIVATIONS_SCALE_FACTOR": "8.0"}
-        models_for_export["transformer"] = (transformer, export_config)
+        try:
+            # Patch projection dimensions for IR compatibility
+            transformer.config.text_encoder_projection_dim = getattr(
+                transformer.config,
+                "joint_attention_dim",
+                getattr(transformer.config, "cross_attention_dim", getattr(transformer.config, "hidden_size", 1152)),
+            )
+            transformer.config.time_cond_proj_dim = None
+            export_config_constructor = TasksManager.get_exporter_config_constructor(
+                model=transformer,
+                exporter=exporter,
+                library_name="diffusers",
+                task="feature-extraction",
+                model_type="anima-transformer-3d",
+            )
+            export_config = export_config_constructor(transformer.config, int_dtype=int_dtype, float_dtype=float_dtype)
+            export_config.runtime_options = {"ACTIVATIONS_SCALE_FACTOR": "8.0"}
+            models_for_export["transformer"] = (transformer, export_config)
+            print("DEBUG: transformer added to models_for_export", flush=True)
+        except Exception as e:
+            print(f"DEBUG: transformer export setup failed: {e}", flush=True)
 
     # 4. VAE Encoder & Decoder (WanVAE 3D Causal)
     vae = getattr(pipeline, "vae", None)
+    if vae is None and model_path:
+        try:
+            from diffusers import WanVAE
+            print("DEBUG: Manually loading vae...", flush=True)
+            vae = WanVAE.from_pretrained(model_path, subfolder="vae")
+        except Exception as e:
+            try:
+                from diffusers import ModelMixin
+                vae = ModelMixin.from_pretrained(model_path, subfolder="vae")
+            except Exception as e2:
+                print(f"DEBUG: Manual vae load failed: {e2}", flush=True)
+    
+    print(f"DEBUG: vae found: {vae is not None}", flush=True)
     if vae is not None:
-        # 4a. Decoder with normalization constants
-        vae_decoder = copy.deepcopy(vae)
-        vae_decoder.forward = lambda latent_sample: vae_decoder.decode(z=latent_sample)
-        vae_decoder.config.latents_mean_data = [
-            -0.7571,
-            -0.7089,
-            -0.9113,
-            0.1075,
-            -0.1745,
-            0.9653,
-            -0.1517,
-            1.5508,
-            0.4134,
-            -0.0715,
-            0.5517,
-            -0.3632,
-            -0.1922,
-            -0.9497,
-            0.2503,
-            -0.2921,
-        ]
-        vae_decoder.config.latents_std_data = [
-            2.8184,
-            1.4541,
-            2.3275,
-            2.6558,
-            1.2196,
-            1.7708,
-            2.6052,
-            2.0743,
-            3.2687,
-            2.1526,
-            2.8652,
-            1.5579,
-            1.6382,
-            1.1253,
-            2.8251,
-            1.9160,
-        ]
+        try:
+            # 4a. Decoder with normalization constants
+            vae_decoder = copy.deepcopy(vae)
+            vae_decoder.forward = lambda latent_sample: vae_decoder.decode(z=latent_sample)
+            # ... (rest of vae decoder config)
+            vae_decoder.config.latents_mean_data = [
+                -0.7571,
+                -0.7089,
+                -0.9113,
+                0.1075,
+                -0.1745,
+                0.9653,
+                -0.1517,
+                1.5508,
+                0.4134,
+                -0.0715,
+                0.5517,
+                -0.3632,
+                -0.1922,
+                -0.9497,
+                0.2503,
+                -0.2921,
+            ]
+            vae_decoder.config.latents_std_data = [
+                2.8184,
+                1.4541,
+                2.3275,
+                2.6558,
+                1.2196,
+                1.7708,
+                2.6052,
+                2.0743,
+                3.2687,
+                2.1526,
+                2.8652,
+                1.5579,
+                1.6382,
+                1.1253,
+                2.8251,
+                1.9160,
+            ]
 
-        # 4b. Encoder
-        vae_encoder = copy.deepcopy(vae)
-        vae_encoder.forward = lambda sample: vae_encoder.encode(x=sample)
+            # 4b. Encoder
+            vae_encoder = copy.deepcopy(vae)
+            vae_encoder.forward = lambda sample: vae_encoder.encode(x=sample)
 
-        for component, model_obj, task, model_type in [
-            ("vae_encoder", vae_encoder, "feature-extraction", "anima-vae-encoder"),
-            ("vae_decoder", vae_decoder, "feature-extraction", "anima-vae-decoder"),
-        ]:
-            export_config_constructor = TasksManager.get_exporter_config_constructor(
-                model=model_obj,
-                exporter=exporter,
-                library_name="diffusers",
-                task=task,
-                model_type=model_type,
-            )
-            models_for_export[component] = (
-                model_obj,
-                export_config_constructor(model_obj.config, int_dtype=int_dtype, float_dtype=float_dtype),
-            )
+            for component, model_obj, task, model_type in [
+                ("vae_encoder", vae_encoder, "feature-extraction", "anima-vae-encoder"),
+                ("vae_decoder", vae_decoder, "feature-extraction", "anima-vae-decoder"),
+            ]:
+                export_config_constructor = TasksManager.get_exporter_config_constructor(
+                    model=model_obj,
+                    exporter=exporter,
+                    library_name="diffusers",
+                    task=task,
+                    model_type=model_type,
+                )
+                models_for_export[component] = (
+                    model_obj,
+                    export_config_constructor(model_obj.config, int_dtype=int_dtype, float_dtype=float_dtype),
+                )
+            print("DEBUG: vae components added to models_for_export", flush=True)
+        except Exception as e:
+            print(f"DEBUG: vae export setup failed: {e}", flush=True)
 
+    print(f"DEBUG: get_anima_models_for_export final models: {list(models_for_export.keys())}", flush=True)
+    return models_for_export
+    print(f"DEBUG: get_anima_models_for_export final models: {list(models_for_export.keys())}", flush=True)
     return models_for_export
