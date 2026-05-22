@@ -134,6 +134,76 @@ core = Core()
 
 logger = logging.getLogger(__name__)
 
+# --- MONKEY PATCH FOR TasksManager LIBRARY INFERENCE (ANIMA SUPPORT) ---
+from optimum.exporters.tasks import TasksManager
+
+def _should_infer_diffusers_for_anima(model_name_or_path):
+    # 1. Check path string
+    path_str = str(model_name_or_path).lower() if model_name_or_path is not None else ""
+    if "anima" in path_str or "extract_safetensor" in path_str:
+        return True
+
+    # 2. Check call stack for any Anima pipeline loading frame
+    try:
+        import sys
+        frame = sys._getframe(1)
+        while frame:
+            cls_obj = frame.f_locals.get("cls")
+            if cls_obj and hasattr(cls_obj, "__name__") and "Anima" in cls_obj.__name__:
+                return True
+            self_obj = frame.f_locals.get("self")
+            if self_obj and "Anima" in self_obj.__class__.__name__:
+                return True
+            frame = frame.f_back
+    except Exception:
+        pass
+
+    # 3. Check JSON config files (both standard and modular index)
+    if model_name_or_path is not None:
+        try:
+            from pathlib import Path
+            import json
+            for name in ["model_index.json", "modular_model_index.json"]:
+                config_path = Path(model_name_or_path) / name
+                if config_path.exists():
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if "Anima" in data.get("_class_name", ""):
+                            return True
+        except Exception:
+            pass
+
+    return False
+
+_original_infer_library_from_model = TasksManager.infer_library_from_model
+
+@classmethod
+def _patched_infer_library_from_model(cls, model_name_or_path, *args, **kwargs):
+    try:
+        return _original_infer_library_from_model(model_name_or_path, *args, **kwargs)
+    except ValueError as e:
+        if _should_infer_diffusers_for_anima(model_name_or_path):
+            logger.info(f"[Anima Patch] Automatically inferred 'diffusers' library for path: {model_name_or_path}")
+            return "diffusers"
+        raise e
+
+TasksManager.infer_library_from_model = _patched_infer_library_from_model
+
+_original_infer_library_from_model_name_or_path = TasksManager._infer_library_from_model_name_or_path
+
+@classmethod
+def _patched_infer_library_from_model_name_or_path(cls, model_name_or_path, *args, **kwargs):
+    try:
+        return _original_infer_library_from_model_name_or_path(model_name_or_path, *args, **kwargs)
+    except ValueError as e:
+        if _should_infer_diffusers_for_anima(model_name_or_path):
+            logger.info(f"[Anima Patch] Automatically inferred 'diffusers' library for path (name_or_path): {model_name_or_path}")
+            return "diffusers"
+        raise e
+
+TasksManager._infer_library_from_model_name_or_path = _patched_infer_library_from_model_name_or_path
+# ----------------------------------------------------------------------
+
 
 # TODO: support DiffusionPipeline.from_pipe()
 # TODO: makes more sense to have a compositional OVMixin class
@@ -1680,6 +1750,7 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
     auto_model_class = AnimaModularPipeline
     main_input_name = "prompt"
     export_feature = "text-to-video"
+    _library_name = "diffusers"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1749,6 +1820,8 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
 
     @classmethod
     def from_pretrained(cls, model_id, **kwargs):
+        if "library_name" not in kwargs:
+            kwargs["library_name"] = "diffusers"
         pipeline = super().from_pretrained(model_id, **kwargs)
         adapter_path = Path(model_id) / "llm_adapter" / "openvino_model.xml"
         if adapter_path.exists():
@@ -1761,6 +1834,7 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
 class OVAnimaModularPipeline(OVAnimaPipeline):
     """OpenVINO implementation of AnimaModularPipeline."""
     auto_model_class = AnimaModularPipeline
+    _library_name = "diffusers"
 
 
 SUPPORTED_OV_PIPELINES = [
