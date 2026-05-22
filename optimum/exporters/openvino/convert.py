@@ -851,7 +851,12 @@ def export_from_model(
         files_subpaths = [os.path.join(name_dir, OV_XML_FILE_NAME) for name_dir in models_and_export_configs]
 
         # Saving the additional components needed to perform inference.
-        model.scheduler.save_pretrained(output.joinpath("scheduler"))
+        if getattr(model, "scheduler", None) is not None:
+            logger.info("Saving scheduler...")
+            model.scheduler.save_pretrained(output.joinpath("scheduler"))
+            logger.info("Scheduler saved successfully.")
+        else:
+            logger.info("No scheduler found to save.")
 
         feature_extractor = getattr(model, "feature_extractor", None)
         if feature_extractor is not None:
