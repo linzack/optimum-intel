@@ -110,9 +110,9 @@ else:
     FluxInpaintPipeline = object
 
 if is_diffusers_version(">=", "0.32.0"):
-    from diffusers import AnimaTextToImagePipeline, FluxFillPipeline, SanaPipeline
+    from diffusers import AnimaModularPipeline, FluxFillPipeline, SanaPipeline
 else:
-    AnimaTextToImagePipeline = object
+    AnimaModularPipeline = object
     FluxFillPipeline = object
     SanaPipeline = object
 
@@ -1674,10 +1674,10 @@ class OVModelLLMAdapter(OVPipelinePart):
         return torch.from_numpy(outputs[0])
 
 
-class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaTextToImagePipeline):
+class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaModularPipeline):
     """OpenVINO implementation of the Anima Text-to-Video pipeline."""
 
-    auto_model_class = AnimaTextToImagePipeline
+    auto_model_class = AnimaModularPipeline
     main_input_name = "prompt"
     export_feature = "text-to-video"
 
