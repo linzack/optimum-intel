@@ -1758,6 +1758,11 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
         return pipeline
 
 
+class OVAnimaModularPipeline(OVAnimaPipeline):
+    """OpenVINO implementation of AnimaModularPipeline."""
+    auto_model_class = AnimaModularPipeline
+
+
 SUPPORTED_OV_PIPELINES = [
     OVStableDiffusionPipeline,
     OVStableDiffusionImg2ImgPipeline,
@@ -1839,7 +1844,8 @@ if is_diffusers_version(">=", "0.32.0"):
     SUPPORTED_OV_PIPELINES.append(OVSanaPipeline)
     # Add Anima
     SUPPORTED_OV_PIPELINES.append(OVAnimaPipeline)
-    OV_TEXT2VIDEO_PIPELINES_MAPPING["anima"] = OVAnimaPipeline
+    SUPPORTED_OV_PIPELINES.append(OVAnimaModularPipeline)
+    OV_TEXT2VIDEO_PIPELINES_MAPPING["anima"] = OVAnimaModularPipeline
 
 
 if is_diffusers_version(">=", "0.33.0"):

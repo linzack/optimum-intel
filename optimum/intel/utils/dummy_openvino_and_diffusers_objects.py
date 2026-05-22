@@ -266,3 +266,26 @@ class OVSanaSprintPipeline(metaclass=DummyObject):
     @classmethod
     def from_pretrained(cls, *args, **kwargs):
         requires_backends(cls, ["openvino", "diffusers"])
+
+
+class OVAnimaPipeline(metaclass=DummyObject):
+    _backends = ["openvino", "diffusers"]
+
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["openvino", "diffusers"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["openvino", "diffusers"])
+
+
+class OVAnimaModularPipeline(metaclass=DummyObject):
+    _backends = ["openvino", "diffusers"]
+
+    def __init__(self, *args, **kwargs):
+        requires_backends(self, ["openvino", "diffusers"])
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        requires_backends(cls, ["openvino", "diffusers"])
+

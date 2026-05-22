@@ -95,6 +95,8 @@ from .modeling_visual_language import OVModelForVisualCausalLM
 if is_diffusers_available():
     from .modeling_diffusion import (
         OVDiffusionPipeline,
+        OVAnimaPipeline,
+        OVAnimaModularPipeline,
         OVFluxFillPipeline,
         OVFluxImg2ImgPipeline,
         OVFluxInpaintPipeline,
