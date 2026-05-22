@@ -873,11 +873,28 @@ def export_from_model(
         tokenizer_3 = getattr(model, "tokenizer_3", None)
         if tokenizer_3 is not None:
             tokenizer_3.save_pretrained(output.joinpath("tokenizer_3"))
+
         safety_checker = getattr(model, "safety_checker", None)
         if safety_checker is not None:
             safety_checker.save_pretrained(output.joinpath("safety_checker"))
 
+        print(f"DEBUG: export_from_model saving config for model {type(model)} to {output}", flush=True)
         model.save_config(output)
+        if library_name == "diffusers" and not (output / "model_index.json").exists():
+            if (output / "modular_model_index.json").exists():
+                print("DEBUG: Copying modular_model_index.json to model_index.json for diffusers compatibility", flush=True)
+                import shutil
+                shutil.copy(output / "modular_model_index.json", output / "model_index.json")
+            elif (output / "config.json").exists():
+                print("DEBUG: Copying config.json to model_index.json for diffusers compatibility", flush=True)
+                import shutil
+                shutil.copy(output / "config.json", output / "model_index.json")
+            else:
+                print(f"DEBUG: export_from_model FAILED to save model_index.json, modular_model_index.json or config.json to {output}. Files: {list(output.glob('*'))}", flush=True)
+        elif not (output / "model_index.json").exists():
+            print(f"DEBUG: export_from_model successfully saved config to {output} (not a diffusers model or already has model_index.json)", flush=True)
+        else:
+            print(f"DEBUG: export_from_model successfully saved model_index.json to {output}", flush=True)
 
     _set_runtime_options(
         models_and_export_configs,

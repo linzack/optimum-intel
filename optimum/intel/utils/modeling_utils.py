@@ -91,6 +91,7 @@ def _find_files_matching_pattern(
     subfolder: str = "",
     use_auth_token: Optional[Union[bool, str]] = None,
     revision: Optional[str] = None,
+    library_name: Optional[str] = None,
 ) -> List[Path]:
     """
     Scans either a model repo or a local directory to find filenames matching the pattern.
@@ -108,6 +109,8 @@ def _find_files_matching_pattern(
             when running `transformers-cli login` (stored in `~/.huggingface`).
         revision (`Optional[str]`, defaults to `None`):
             Revision is the specific model version to use. It can be a branch name, a tag name, or a commit id.
+        library_name (`Optional[str]`, defaults to `None`):
+            The library name (e.g. "transformers", "diffusers"). If not provided, it will be inferred from the model.
 
     Returns:
         `List[Path]`
@@ -119,21 +122,36 @@ def _find_files_matching_pattern(
     else:
         token = use_auth_token
 
-    library_name = infer_library_from_model(
-        str(model_name_or_path), subfolder=subfolder, revision=revision, token=token
-    )
+    if library_name is None:
+        library_name = infer_library_from_model(
+            str(model_name_or_path), subfolder=subfolder, revision=revision, token=token
+        )
+    
     if library_name == "diffusers":
         subfolders = [os.path.join(subfolder, "unet"), os.path.join(subfolder, "transformer")]
     else:
         subfolders = [subfolder or "."]
 
+    print(f"DEBUG: _find_files_matching_pattern model_name_or_path={model_name_or_path}, library_name={library_name}, subfolders={subfolders}, pattern={pattern}", flush=True)
+
     if model_path.is_dir():
         files = []
         for subfolder in subfolders:
             glob_pattern = subfolder + "/*"
-            files_ = model_path.glob(glob_pattern)
-            files_ = [p for p in files_ if re.search(pattern, str(p))]
-            files.extend(files_)
+            files_ = list(model_path.glob(glob_pattern))
+            files_matched = [p for p in files_ if re.search(pattern, str(p))]
+            files.extend(files_matched)
+        
+        # If nothing found in standard subfolders, try searching everywhere in the directory
+        if not files:
+            print(f"DEBUG: _find_files_matching_pattern nothing found in {subfolders}, searching everywhere in {model_path}", flush=True)
+            try:
+                files_ = list(model_path.rglob("*"))
+                files = [p for p in files_ if re.search(pattern, str(p)) and p.is_file()]
+                if files:
+                    print(f"DEBUG: _find_files_matching_pattern found files via rglob: {files}", flush=True)
+            except Exception as e:
+                print(f"DEBUG: _find_files_matching_pattern rglob failed: {e}", flush=True)
     else:
         repo_files = map(Path, HfApi().list_repo_files(model_name_or_path, revision=revision, token=token))
         files = [Path(p) for p in repo_files if re.match(pattern, str(p)) and str(p.parent) in subfolders]

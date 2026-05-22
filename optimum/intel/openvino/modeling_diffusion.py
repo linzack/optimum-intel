@@ -136,72 +136,163 @@ logger = logging.getLogger(__name__)
 
 # --- MONKEY PATCH FOR TasksManager LIBRARY INFERENCE (ANIMA SUPPORT) ---
 from optimum.exporters.tasks import TasksManager
+import optimum.intel.utils.modeling_utils as modeling_utils
 
 def _should_infer_diffusers_for_anima(model_name_or_path):
+    print(f"\n[Anima Debug] _should_infer_diffusers_for_anima called with model_name_or_path={model_name_or_path} ({type(model_name_or_path)})", flush=True)
+    
     # 1. Check path string
     path_str = str(model_name_or_path).lower() if model_name_or_path is not None else ""
     if "anima" in path_str or "extract_safetensor" in path_str:
+        print(f"[Anima Debug] Path string match: 'anima' or 'extract_safetensor' is in '{path_str}'", flush=True)
         return True
 
-    # 2. Check call stack for any Anima pipeline loading frame
+    # 2. Check call stack
     try:
         import sys
         frame = sys._getframe(1)
+        depth = 0
         while frame:
-            cls_obj = frame.f_locals.get("cls")
-            if cls_obj and hasattr(cls_obj, "__name__") and "Anima" in cls_obj.__name__:
-                return True
-            self_obj = frame.f_locals.get("self")
-            if self_obj and "Anima" in self_obj.__class__.__name__:
-                return True
-            frame = frame.f_back
-    except Exception:
-        pass
+            func_name = frame.f_code.co_name
+            filename = frame.f_code.co_filename
+            print(f"[Anima Debug] Frame depth {depth}: func={func_name}, file={filename}", flush=True)
+            
+            try:
+                if "anima" in func_name.lower():
+                    print(f"[Anima Debug] Function name match: 'anima' in '{func_name}'", flush=True)
+                    return True
+            except Exception as e:
+                print(f"[Anima Debug] Frame inspect error in func_name: {e}", flush=True)
 
-    # 3. Check JSON config files (both standard and modular index)
+            try:
+                for k, val in list(frame.f_locals.items()):
+                    try:
+                        # Check key
+                        if "anima" in str(k).lower():
+                            print(f"[Anima Debug] Local variable key match: key='{k}'", flush=True)
+                            return True
+                        # Check class/type name
+                        if isinstance(val, type) and "Anima" in val.__name__:
+                            print(f"[Anima Debug] Class type name match: type={val.__name__}", flush=True)
+                            return True
+                        # Check instance class name
+                        if val and not isinstance(val, type) and hasattr(val, "__class__") and "Anima" in val.__class__.__name__:
+                            print(f"[Anima Debug] Instance class name match: class={val.__class__.__name__}", flush=True)
+                            return True
+                        # Check string variable value
+                        if isinstance(val, str) and "anima" in val.lower():
+                            print(f"[Anima Debug] String variable value match: val='{val}'", flush=True)
+                            return True
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[Anima Debug] Frame inspect error in locals loop: {e}", flush=True)
+            
+            frame = frame.f_back
+            depth += 1
+    except Exception as e:
+        print(f"[Anima Debug] Stack trace inspection crashed: {e}", flush=True)
+
+    # 3. Check JSON config files
     if model_name_or_path is not None:
         try:
             from pathlib import Path
             import json
-            for name in ["model_index.json", "modular_model_index.json"]:
-                config_path = Path(model_name_or_path) / name
-                if config_path.exists():
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        if "Anima" in data.get("_class_name", ""):
-                            return True
-        except Exception:
-            pass
+            p = Path(model_name_or_path)
+            print(f"[Anima Debug] Directory check: {p} (exists: {p.exists()}, is_dir: {p.is_dir()})", flush=True)
+            if p.exists() and p.is_dir():
+                print(f"[Anima Debug] Files in directory: {[x.name for x in p.iterdir()]}", flush=True)
+                for name in ["model_index.json", "modular_model_index.json"]:
+                    config_path = p / name
+                    if config_path.exists():
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                            print(f"[Anima Debug] Config {name} class_name: {data.get('_class_name')}", flush=True)
+                            if "Anima" in data.get("_class_name", ""):
+                                print(f"[Anima Debug] JSON config class name match in {name}: {data.get('_class_name')}", flush=True)
+                                return True
+                if (p / "modular_model_index.json").exists():
+                    print(f"[Anima Debug] modular_model_index.json exists in {p}, returning True", flush=True)
+                    return True
+        except Exception as e:
+            print(f"[Anima Debug] Config files check crashed: {e}", flush=True)
 
+    print(f"[Anima Debug] _should_infer_diffusers_for_anima returning False for model_name_or_path={model_name_or_path}\n", flush=True)
     return False
 
+# 1. Patch TasksManager.infer_library_from_model
 _original_infer_library_from_model = TasksManager.infer_library_from_model
 
 @classmethod
 def _patched_infer_library_from_model(cls, model_name_or_path, *args, **kwargs):
+    print(f"[Anima Debug] TasksManager.infer_library_from_model called with model_name_or_path={model_name_or_path}", flush=True)
     try:
-        return _original_infer_library_from_model(model_name_or_path, *args, **kwargs)
-    except ValueError as e:
+        res = _original_infer_library_from_model(model_name_or_path, *args, **kwargs)
+        print(f"[Anima Debug] TasksManager.infer_library_from_model succeeded: {res}", flush=True)
+        return res
+    except Exception as e:
+        print(f"[Anima Debug] TasksManager.infer_library_from_model caught exception: {type(e)} - {e}", flush=True)
         if _should_infer_diffusers_for_anima(model_name_or_path):
-            logger.info(f"[Anima Patch] Automatically inferred 'diffusers' library for path: {model_name_or_path}")
+            print(f"[Anima Debug] TasksManager.infer_library_from_model: Automatically inferred 'diffusers'", flush=True)
             return "diffusers"
         raise e
 
 TasksManager.infer_library_from_model = _patched_infer_library_from_model
 
+# 2. Patch TasksManager._infer_library_from_model_name_or_path
 _original_infer_library_from_model_name_or_path = TasksManager._infer_library_from_model_name_or_path
 
 @classmethod
 def _patched_infer_library_from_model_name_or_path(cls, model_name_or_path, *args, **kwargs):
+    print(f"[Anima Debug] TasksManager._infer_library_from_model_name_or_path called with model_name_or_path={model_name_or_path}", flush=True)
     try:
-        return _original_infer_library_from_model_name_or_path(model_name_or_path, *args, **kwargs)
-    except ValueError as e:
+        res = _original_infer_library_from_model_name_or_path(model_name_or_path, *args, **kwargs)
+        print(f"[Anima Debug] TasksManager._infer_library_from_model_name_or_path succeeded: {res}", flush=True)
+        return res
+    except Exception as e:
+        print(f"[Anima Debug] TasksManager._infer_library_from_model_name_or_path caught exception: {type(e)} - {e}", flush=True)
         if _should_infer_diffusers_for_anima(model_name_or_path):
-            logger.info(f"[Anima Patch] Automatically inferred 'diffusers' library for path (name_or_path): {model_name_or_path}")
+            print(f"[Anima Debug] TasksManager._infer_library_from_model_name_or_path: Automatically inferred 'diffusers'", flush=True)
             return "diffusers"
         raise e
 
 TasksManager._infer_library_from_model_name_or_path = _patched_infer_library_from_model_name_or_path
+
+# 3. Patch modeling_utils.infer_library_from_model
+_original_utils_infer_library_from_model = modeling_utils.infer_library_from_model
+
+def _patched_utils_infer_library_from_model(model, *args, **kwargs):
+    print(f"[Anima Debug] utils.infer_library_from_model called with model={model}", flush=True)
+    try:
+        res = _original_utils_infer_library_from_model(model, *args, **kwargs)
+        print(f"[Anima Debug] utils.infer_library_from_model succeeded: {res}", flush=True)
+        return res
+    except Exception as e:
+        print(f"[Anima Debug] utils.infer_library_from_model caught exception: {type(e)} - {e}", flush=True)
+        if _should_infer_diffusers_for_anima(model):
+            print(f"[Anima Debug] utils.infer_library_from_model: Automatically inferred 'diffusers'", flush=True)
+            return "diffusers"
+        raise e
+
+modeling_utils.infer_library_from_model = _patched_utils_infer_library_from_model
+
+# 4. Patch modeling_utils._infer_library_from_model_name_or_path
+_original_utils_infer_library_from_model_name_or_path = modeling_utils._infer_library_from_model_name_or_path
+
+def _patched_utils_infer_library_from_model_name_or_path(model_name_or_path, *args, **kwargs):
+    print(f"[Anima Debug] utils._infer_library_from_model_name_or_path called with model_name_or_path={model_name_or_path}", flush=True)
+    try:
+        res = _original_utils_infer_library_from_model_name_or_path(model_name_or_path, *args, **kwargs)
+        print(f"[Anima Debug] utils._infer_library_from_model_name_or_path succeeded: {res}", flush=True)
+        return res
+    except Exception as e:
+        print(f"[Anima Debug] utils._infer_library_from_model_name_or_path caught exception: {type(e)} - {e}", flush=True)
+        if _should_infer_diffusers_for_anima(model_name_or_path):
+            print(f"[Anima Debug] utils._infer_library_from_model_name_or_path: Automatically inferred 'diffusers'", flush=True)
+            return "diffusers"
+        raise e
+
+modeling_utils._infer_library_from_model_name_or_path = _patched_utils_infer_library_from_model_name_or_path
 # ----------------------------------------------------------------------
 
 
@@ -648,6 +739,7 @@ class OVDiffusionPipeline(OVBaseModel, DiffusionPipeline):
         compile_only: bool = False,
         **kwargs,
     ):
+        print(f"DEBUG: _export model_id={model_id}, task={cls.export_feature}", flush=True)
         if compile_only:
             logger.warning(
                 "`compile_only` mode will be disabled because it does not support model export."
@@ -1043,6 +1135,14 @@ class OVDiffusionPipeline(OVBaseModel, DiffusionPipeline):
 
     @classmethod
     def _load_config(cls, config_name_or_path: Union[str, os.PathLike], **kwargs):
+        # Dynamically support both modular and standard index files
+        from pathlib import Path
+        path = Path(config_name_or_path)
+        if path.exists() and path.is_dir():
+            if (path / "modular_model_index.json").exists() and not (path / "model_index.json").exists():
+                cls.config_name = "modular_model_index.json"
+            elif (path / "model_index.json").exists():
+                cls.config_name = "model_index.json"
         return cls.load_config(config_name_or_path, **kwargs)
 
     def __call__(self, *args, **kwargs):

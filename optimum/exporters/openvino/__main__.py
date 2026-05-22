@@ -499,7 +499,10 @@ def main_export(
         if loading_kwargs.get("torch_dtype") == "auto":
             loading_kwargs["torch_dtype"] = dtype
 
+    print(f"DEBUG: main_export model_name_or_path={model_name_or_path}, library_name={library_name}, task={task}, output={output}", flush=True)
+
     try:
+        # Load the model
         if library_name == "open_clip":
             model = _OpenClipForZeroShotImageClassification.from_pretrained(model_name_or_path, cache_dir=cache_dir)
         elif library_name == "kokoro":
