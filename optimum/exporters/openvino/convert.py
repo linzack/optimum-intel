@@ -1127,7 +1127,7 @@ def get_diffusion_models_for_export_ext(
         or (pipeline.__class__.__name__.startswith("Cosmos") and hasattr(pipeline, "llm_adapter"))
     )
     if is_anima:
-        return get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype)
+        return None, get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype)
 
     is_sdxl = pipeline.__class__.__name__.startswith("StableDiffusionXL")
     is_sd3 = pipeline.__class__.__name__.startswith("StableDiffusion3")
