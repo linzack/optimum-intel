@@ -1884,8 +1884,48 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
     export_feature = "text-to-video"
     _library_name = "diffusers"
 
+    @property
+    def _component_names(self) -> List[str]:
+        names = super()._component_names
+        if getattr(self, "llm_adapter", None) is not None:
+            names = names + ["llm_adapter"]
+        return names
+
+    @property
+    def _ov_model_paths(self) -> Dict[str, str]:
+        paths = {}
+        for name in self._ov_model_names:
+            if name == "llm_adapter":
+                paths["llm_adapter"] = "llm_adapter/openvino_model.xml"
+            else:
+                paths[name] = self._all_ov_model_paths[name]
+        return paths
+
+    def register_components(self, **kwargs):
+        """Intercept component registration to protect pre-loaded OpenVINO components from being modularly overwritten with None."""
+        is_init = not getattr(self, "_ov_init_complete", False)
+        saved_components = {}
+        
+        if is_init:
+            for name in kwargs:
+                current_val = getattr(self, name, None)
+                if current_val is not None:
+                    saved_components[name] = current_val
+
+        # Allow ModularPipeline.__init__ to execute all standard registrations
+        super().register_components(**kwargs)
+
+        # Restore our loaded OpenVINO components if they were set to None
+        if is_init:
+            for name, current_val in saved_components.items():
+                if getattr(self, name, None) is None:
+                    print(f"[Anima Debug] Restoring pre-loaded OV component: {name}={type(current_val).__name__}", flush=True)
+                    setattr(self, name, current_val)
+                    self.register_to_config(**{name: (None, None, {})}) # Resync config
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._ov_init_complete = True
 
         # True Dynamic Wrapping (Monkey-patching) to preserve state
         if hasattr(self, "transformer") and self.transformer is not None and getattr(self.transformer, "_rank_corrected", False) is False:
@@ -1910,7 +1950,14 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
             self.transformer._rank_corrected = True
 
     def _reshape_transformer(
-        self, model: openvino.Model, batch_size, height, width, num_images_per_prompt, num_frames=1
+        self,
+        model: openvino.Model,
+        batch_size: int = -1,
+        height: int = -1,
+        width: int = -1,
+        num_images_per_prompt: int = -1,
+        tokenizer_max_length: int = -1,
+        num_frames: int = -1,
     ):
         # Anima/Cosmos specific coordinate generation logic
         shapes = {}
@@ -1918,6 +1965,8 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
         # Anima 5D VAE compression is 8x8x8
         height //= 8
         width //= 8
+        if num_frames is None or num_frames < 0:
+            num_frames = 1
         num_frames = (num_frames - 1) // 8 + 1
         packed_height_width = height * width * num_frames
 
