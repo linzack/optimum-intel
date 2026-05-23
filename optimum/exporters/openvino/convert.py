@@ -1622,14 +1622,24 @@ def _resolve_anima_text_encoder_model_type(text_encoder, default_model_type: str
     encoder_cls_name = text_encoder.__class__.__name__
     tokenizer_cls_name = tokenizer.__class__.__name__ if tokenizer is not None else ""
 
-    looks_like_qwen = (
+    looks_like_qwen3 = (
+        model_type in {"qwen3", "qwen3_vl"}
+        or any("Qwen3" in arch for arch in architectures)
+        or "Qwen3" in encoder_cls_name
+        or "Qwen3" in tokenizer_cls_name
+    )
+    if looks_like_qwen3:
+        return "qwen3"
+
+    looks_like_qwen2 = (
         model_type in {"qwen", "qwen2", "qwen2_5", "qwen2_5_vl"}
         or any("Qwen" in arch for arch in architectures)
         or "Qwen" in encoder_cls_name
         or "Qwen" in tokenizer_cls_name
     )
-    if looks_like_qwen:
-        return "qwen2_5_vl_text"
+    if looks_like_qwen2:
+        # Fallback to qwen2 if qwen2_5_vl_text is not supported
+        return "qwen2"
 
     return default_model_type
 
@@ -1661,10 +1671,17 @@ def _add_anima_text_encoder_for_export(
         text_encoder_for_export.config.output_hidden_states = True
         text_encoder_for_export.config.return_dict = True
 
+    print(f"DEBUG: text_encoder_model_type={text_encoder_model_type}", flush=True)
+    lib_name = "diffusers"
+    if text_encoder_model_type.startswith("qwen") or "qwen" in str(type(text_encoder_for_export)).lower():
+        lib_name = "transformers"
+    
+    print(f"DEBUG: Using library_name={lib_name} for text encoder export", flush=True)
+
     export_config_constructor = TasksManager.get_exporter_config_constructor(
         model=text_encoder_for_export,
         exporter=exporter,
-        library_name="diffusers",
+        library_name=lib_name,
         task="feature-extraction",
         model_type=text_encoder_model_type,
     )
