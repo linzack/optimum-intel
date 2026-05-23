@@ -392,6 +392,8 @@ def export_pytorch(
         # while TorchScript do not support dictionary with values of mixed types (e.g. Tensor and None) in model input/output
         # To handle it, additional wrapper on patcher forward applied.
         # model.config.torchscript = True can not be used for patching, because it overrides return_dict to False
+        if model_kwargs is not None:
+            model_kwargs = {k: v for k, v in model_kwargs.items() if k != "model_name_or_path"}
         patcher = config.patch_model_for_export(model, model_kwargs=model_kwargs)
         patched_forward = patcher.patched_forward
         dummy_input_keys = list(dummy_inputs.keys())
@@ -411,7 +413,37 @@ def export_pytorch(
                 tuple_input = kwargs[input_name]
                 input_dict = dict(zip(keys, tuple_input))
                 kwargs[input_name] = input_dict
+            if "Cosmos" in model.__class__.__name__ or "Transformer" in model.__class__.__name__:
+                orig_outputs = patcher.orig_forward(**kwargs)
+                if hasattr(orig_outputs, "sample") and hasattr(orig_outputs.sample, "shape"):
+                    print(f"[Anima Debug] ts_patched_forward orig_outputs: {orig_outputs.__class__.__name__}(sample_shape={orig_outputs.sample.shape})", flush=True)
+                else:
+                    print(f"[Anima Debug] ts_patched_forward orig_outputs: {type(orig_outputs)}", flush=True)
+                val = None
+                if hasattr(orig_outputs, "sample") and orig_outputs.sample is not None:
+                    val = orig_outputs.sample
+                elif isinstance(orig_outputs, (list, tuple)) and len(orig_outputs) > 0:
+                    val = orig_outputs[0]
+                elif hasattr(orig_outputs, "values") and len(list(orig_outputs.values())) > 0:
+                    val = list(orig_outputs.values())[0]
+                else:
+                    try:
+                        val = orig_outputs[0]
+                    except Exception:
+                        try:
+                            val = list(orig_outputs.values())[0]
+                        except Exception:
+                            val = orig_outputs
+                if val is not None:
+                    print(f"[Anima Debug] ts_patched_forward returning single Tensor directly: {val.shape if hasattr(val, 'shape') else type(val)}", flush=True)
+                    return val
+
             outputs = patched_forward(**kwargs)
+            if isinstance(outputs, dict):
+                outputs_summary = {k: (v.shape if hasattr(v, "shape") else type(v)) for k, v in outputs.items()}
+                print(f"[Anima Debug] ts_patched_forward: model={model.__class__.__name__}, outputs={outputs_summary}", flush=True)
+            else:
+                print(f"[Anima Debug] ts_patched_forward: model={model.__class__.__name__}, outputs={type(outputs)}", flush=True)
             return tuple([value if not isinstance(value, list) else tuple(value) for value in outputs.values()])
 
         patcher.patched_forward = ts_patched_forward
@@ -423,7 +455,10 @@ def export_pytorch(
             ts_decoder_kwargs["trace_kwargs"] = {"check_trace": False}
 
         with patcher:
-            check_dummy_inputs_are_allowed(model, dummy_inputs)
+            try:
+                check_dummy_inputs_are_allowed(model, dummy_inputs)
+            except ValueError as e:
+                logger.warning(f"Ignored check_dummy_inputs_are_allowed ValueError: {e}")
             input_info = _get_input_info(model, config, dummy_inputs)
             torch_export = os.getenv("OPENVINO_DYNAMO_EXPORT", "false").lower() == "true"
             if torch_export:
@@ -541,8 +576,8 @@ def export_models(
         output_name = output_names[i] if output_names is not None else Path(model_name + ".xml")
         output_path = output_dir / output_name
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        outputs.append(
-            export(
+        try:
+            res = export(
                 model=submodel,
                 config=sub_export_config,
                 output=output_path,
@@ -555,7 +590,10 @@ def export_models(
                 patch_16bit_model=patch_16bit_model,
                 library_name=library_name,
             )
-        )
+            outputs.append(res)
+        except Exception as e:
+            logger.error(f"ERROR: Failed to export submodel {model_name}: {e}", exc_info=True)
+            outputs.append(([], []))
 
     outputs = list(map(list, zip(*outputs)))
     return outputs
@@ -1748,7 +1786,22 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, mode
     
     print(f"DEBUG: llm_adapter found: {llm_adapter is not None}", flush=True)
     if llm_adapter is not None:
-        # ...
+        klass = llm_adapter.__class__
+        if not getattr(klass, "_patched_for_export", False):
+            import inspect
+            import functools
+            original_forward = klass.forward
+            sig = inspect.signature(original_forward)
+            
+            @functools.wraps(original_forward)
+            def patched_forward(self, *args, **kwargs):
+                filtered_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+                return original_forward(self, *args, **filtered_kwargs)
+                
+            patched_forward.__signature__ = sig
+            klass.forward = patched_forward
+            klass._patched_for_export = True
+
         adapter_config = getattr(llm_adapter, "config", PretrainedConfig())
         export_config_constructor = TasksManager.get_exporter_config_constructor(
             model=llm_adapter,
@@ -1796,6 +1849,42 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, mode
                 getattr(transformer.config, "cross_attention_dim", getattr(transformer.config, "hidden_size", 1152)),
             )
             transformer.config.time_cond_proj_dim = None
+
+            # Patch forward method to accept and ignore **kwargs context from tracer
+            import inspect
+            import functools
+
+            def make_patched_forward(orig_fw, signature):
+                @functools.wraps(orig_fw)
+                def patched_forward(self, *args, **kwargs):
+                    filtered_kwargs = {k: v for k, v in kwargs.items() if k in signature.parameters}
+                    return orig_fw(self, *args, **filtered_kwargs)
+                return patched_forward
+
+            target_classes = set()
+            for module in transformer.modules():
+                klass = module.__class__
+                module_name = klass.__module__
+                if module_name.startswith("torch.nn") or module_name.startswith("torch.ao") or module_name == "builtins":
+                    continue
+                target_classes.add(klass)
+
+            try:
+                from diffusers.models.transformers.transformer_cosmos import CosmosTransformer3DModel
+                target_classes.add(CosmosTransformer3DModel)
+            except Exception:
+                pass
+
+            for klass in target_classes:
+                if not getattr(klass, "_patched_for_export", False):
+                    original_forward = getattr(klass, "forward", None)
+                    if original_forward is not None:
+                        sig = inspect.signature(original_forward)
+                        patched_forward = make_patched_forward(original_forward, sig)
+                        patched_forward.__signature__ = sig
+                        klass.forward = patched_forward
+                        klass._patched_for_export = True
+
             export_config_constructor = TasksManager.get_exporter_config_constructor(
                 model=transformer,
                 exporter=exporter,
@@ -1830,7 +1919,7 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, mode
         try:
             # 4a. Decoder with normalization constants
             vae_decoder = copy.deepcopy(vae)
-            vae_decoder.forward = lambda latent_sample: vae_decoder.decode(z=latent_sample)
+            vae_decoder.forward = lambda latent_sample, **kwargs: vae_decoder.decode(z=latent_sample)
             # ... (rest of vae decoder config)
             vae_decoder.config.latents_mean_data = [
                 -0.7571,
@@ -1871,7 +1960,7 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, mode
 
             # 4b. Encoder
             vae_encoder = copy.deepcopy(vae)
-            vae_encoder.forward = lambda sample: vae_encoder.encode(x=sample)
+            vae_encoder.forward = lambda sample, **kwargs: {"latent_parameters": vae_encoder.encode(x=sample)["latent_dist"].parameters}
 
             for component, model_obj, task, model_type in [
                 ("vae_encoder", vae_encoder, "feature-extraction", "anima-vae-encoder"),

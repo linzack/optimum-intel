@@ -9872,17 +9872,28 @@ class AnimaTransformerModelPatcher(ModelPatcher):
     def __enter__(self):
         super().__enter__()
         self.original_processors = {}
+        head_dim = getattr(self._model.config, "head_dim", None)
+        if head_dim is None and hasattr(self._model.config, "get"):
+            head_dim = self._model.config.get("head_dim", 64)
+        if head_dim is None:
+            hidden_size = getattr(self._model.config, "hidden_size", 1152)
+            num_attention_heads = getattr(self._model.config, "num_attention_heads", 16)
+            head_dim = hidden_size // num_attention_heads
+
         for name, module in self._model.named_modules():
             if "attn" in name and hasattr(module, "processor"):
                 self.original_processors[name] = module.processor
                 is_cross = "attn2" in name
-                module.processor = AnimaAttentionProcessor(self._model.config.head_dim, is_cross=is_cross)
+                module._modules.pop("processor", None)  # Bypass PyTorch submodule type checking
+                module.processor = AnimaAttentionProcessor(head_dim, is_cross=is_cross)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         super().__exit__(exc_type, exc_val, exc_tb)
         for name, processor in self.original_processors.items():
-            self._model.get_submodule(name).processor = processor
+            submod = self._model.get_submodule(name)
+            submod._modules.pop("processor", None)  # Bypass PyTorch submodule type checking
+            submod.processor = processor
 
 
 class AnimaAttentionProcessor(nn.Module):
@@ -9900,23 +9911,43 @@ class AnimaAttentionProcessor(nn.Module):
         key = attn.to_k(encoder_hidden_states if self.is_cross else hidden_states)
         value = attn.to_v(encoder_hidden_states if self.is_cross else hidden_states)
 
+        heads = attn.heads
+        head_dim = query.shape[-1] // heads
+
+        # Log shapes before reshaping to debug mismatch
+        print(f"[Anima Debug] Before Reshape - query: {query.shape}, key: {key.shape}, value: {value.shape}, heads: {heads}, head_dim: {head_dim}, self.head_dim: {self.head_dim}")
+
+        if head_dim != self.head_dim:
+            self.head_dim = head_dim
+            self.rope = AnimaEmbedRope(head_dim)
+
         def reshape_heads(x):
-            return x.view(batch_size, -1, attn.heads, self.head_dim)
+            return x.view(batch_size, -1, heads, head_dim)
 
         query, key, value = map(reshape_heads, (query, key, value))
 
         if not self.is_cross:
-            img_ids = kwargs.get("img_ids")
-            txt_ids = kwargs.get("txt_ids")
-            query, key = self.rope(query, key, img_ids, txt_ids)
+            image_rotary_emb = kwargs.get("image_rotary_emb")
+            if image_rotary_emb is not None:
+                query = apply_rotary_emb_qwen(query, image_rotary_emb, use_real=True, use_real_unbind_dim=-2)
+                key = apply_rotary_emb_qwen(key, image_rotary_emb, use_real=True, use_real_unbind_dim=-2)
+            else:
+                img_ids = kwargs.get("img_ids")
+                txt_ids = kwargs.get("txt_ids")
+                if img_ids is not None:
+                    query, key = self.rope(query, key, img_ids, txt_ids)
 
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
         hidden_states = F.scaled_dot_product_attention(query, key, value)
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * self.head_dim)
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, heads * head_dim)
         hidden_states = attn.to_out[0](hidden_states)
+
+        # Log shapes after output projection
+        print(f"[Anima Debug] After - hidden_states: {hidden_states.shape}")
+
         return hidden_states
 
 

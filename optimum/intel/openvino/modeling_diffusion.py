@@ -1488,7 +1488,16 @@ class OVModelVaeEncoder(OVPipelinePart):
                 "The `scaling_factor` attribute is missing from the VAE encoder configuration. "
                 "Please re-export the model with newer version of optimum and diffusers."
             )
-            self.register_to_config(scaling_factor=2 ** (len(self.config.block_out_channels) - 1))
+            block_out_channels = getattr(self.config, "block_out_channels", None)
+            if block_out_channels is None and hasattr(self.config, "get"):
+                block_out_channels = self.config.get("block_out_channels", None)
+            if block_out_channels is not None:
+                factor = 2 ** (len(block_out_channels) - 1)
+            elif getattr(self.config, "dim_mult", None) is not None:
+                factor = 2 ** (len(self.config.dim_mult) - 1)
+            else:
+                factor = 8.0
+            self.register_to_config(scaling_factor=float(factor))
 
     def forward(
         self,
@@ -1530,7 +1539,16 @@ class OVModelVaeDecoder(OVPipelinePart):
                 "The `scaling_factor` attribute is missing from the VAE decoder configuration. "
                 "Please re-export the model with newer version of optimum and diffusers."
             )
-            self.register_to_config(scaling_factor=2 ** (len(self.config.block_out_channels) - 1))
+            block_out_channels = getattr(self.config, "block_out_channels", None)
+            if block_out_channels is None and hasattr(self.config, "get"):
+                block_out_channels = self.config.get("block_out_channels", None)
+            if block_out_channels is not None:
+                factor = 2 ** (len(block_out_channels) - 1)
+            elif getattr(self.config, "dim_mult", None) is not None:
+                factor = 2 ** (len(self.config.dim_mult) - 1)
+            else:
+                factor = 8.0
+            self.register_to_config(scaling_factor=float(factor))
 
     def forward(
         self,
@@ -1870,7 +1888,7 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
         super().__init__(*args, **kwargs)
 
         # True Dynamic Wrapping (Monkey-patching) to preserve state
-        if hasattr(self, "transformer") and getattr(self.transformer, "_rank_corrected", False) is False:
+        if hasattr(self, "transformer") and self.transformer is not None and getattr(self.transformer, "_rank_corrected", False) is False:
             original_forward = self.transformer.forward
 
             def rank_corrected_forward(*f_args, **f_kwargs):

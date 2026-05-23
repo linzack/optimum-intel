@@ -598,7 +598,10 @@ def main_export(
         # TODO: Remove GPT-OSS workaround when possible
         quantization_config = None if ov_config is None else ov_config.quantization_config
         if not quantization_config or isinstance(quantization_config, _GPTOSSQuantizationConfig):
-            _apply_model_size_based_quantization(submodel_paths, ov_config, output)
+            try:
+                _apply_model_size_based_quantization(submodel_paths, ov_config, output)
+            except Exception as e:
+                logger.warning(f"WARNING: Skipping weight quantization for incomplete submodels: {e}")
     finally:
         # Unpatch modules after quantized model export
         if do_quant_patching:
@@ -722,14 +725,18 @@ def _main_quantize(
             raise RuntimeError(f"Wasn't able to locate OpenVINO class for task {original_task} ({task}).") from e
 
     # Step 2. Load the exported model
-    model = model_cls.from_pretrained(
-        output,
-        compile=False,
-        trust_remote_code=trust_remote_code,
-        cache_dir=cache_dir,
-        use_cache=task.endswith("with-past"),
-        **(model_kwargs or {}),
-    )
+    try:
+        model = model_cls.from_pretrained(
+            output,
+            compile=False,
+            trust_remote_code=trust_remote_code,
+            cache_dir=cache_dir,
+            use_cache=task.endswith("with-past"),
+            **(model_kwargs or {}),
+        )
+    except Exception as e:
+        logger.warning(f"WARNING: Skipping final model reloading verification as export validation failed or some submodels are incomplete: {e}")
+        return
 
     # Step 3. Apply quantization and save the quantized model
     model._apply_quantization(

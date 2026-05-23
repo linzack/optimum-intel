@@ -3041,7 +3041,12 @@ class AnimaVaeDummyInputGenerator(DummyVisionInputGenerator):
         num_frames: int = 2,
         **kwargs,
     ):
-        super().__init__(task, normalized_config, batch_size, num_channels, width, height, **kwargs)
+        self.task = task
+        self.normalized_config = normalized_config
+        self.batch_size = batch_size
+        self.num_channels = num_channels
+        self.width = width
+        self.height = height
         self.num_frames = num_frames
 
     def generate(self, input_name: str, framework: str = "pt", int_dtype: str = "int64", float_dtype: str = "fp32"):
@@ -3079,7 +3084,12 @@ class DummyAnimaTransformerInputGenerator(DummyVisionInputGenerator):
         num_frames: int = 2,
         **kwargs,
     ):
-        super().__init__(task, normalized_config, batch_size, num_channels, width, height, **kwargs)
+        self.task = task
+        self.normalized_config = normalized_config
+        self.batch_size = batch_size
+        self.num_channels = num_channels
+        self.width = width
+        self.height = height
         self.num_frames = num_frames if num_frames > 0 else 1
 
     def generate(self, input_name: str, framework: str = "pt", int_dtype: str = "int64", float_dtype: str = "fp32"):
@@ -3088,7 +3098,7 @@ class DummyAnimaTransformerInputGenerator(DummyVisionInputGenerator):
 
         if input_name == "hidden_states":
             return self.random_float_tensor(
-                [self.batch_size, num_patches, getattr(self.normalized_config, "hidden_size", 1152)],
+                [self.batch_size, self.num_channels, self.num_frames, self.height, self.width],
                 framework=framework,
                 dtype=float_dtype,
             )
@@ -3129,19 +3139,17 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
     @property
     def inputs(self) -> Dict[str, Dict[int, str]]:
         return {
-            "hidden_states": {0: "batch_size", 1: "sequence_length"},
+            "hidden_states": {0: "batch_size", 1: "num_channels", 2: "num_frames", 3: "height", 4: "width"},
             "timestep": {0: "batch_size"},
             "guidance": {0: "batch_size"},
             "encoder_hidden_states": {0: "batch_size", 1: "encoder_sequence_length"},
-            "img_ids": {0: "batch_size", 1: "sequence_length"} if self.is_dynamic else {0: "sequence_length"},
-            "txt_ids": {0: "batch_size", 1: "encoder_sequence_length"}
-            if self.is_dynamic
-            else {0: "encoder_sequence_length"},
+            "img_ids": {0: "batch_size", 1: "sequence_length"} if is_diffusers_version(">=", "0.31.0") else {0: "sequence_length"},
+            "txt_ids": {0: "batch_size", 1: "encoder_sequence_length"} if is_diffusers_version(">=", "0.31.0") else {0: "encoder_sequence_length"},
         }
 
     @property
     def outputs(self) -> Dict[str, Dict[int, str]]:
-        return {"sample": {0: "batch_size", 1: "sequence_length"}}
+        return {"sample": {0: "batch_size", 1: "num_channels", 2: "num_frames", 3: "height", 4: "width"}}
 
 
 @register_in_tasks_manager("anima-llm-adapter", *["feature-extraction"], library_name="diffusers")
