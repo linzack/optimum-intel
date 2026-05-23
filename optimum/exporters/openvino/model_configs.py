@@ -3012,10 +3012,14 @@ class DummyAnimaAdapterInputGenerator(DummyInputGenerator):
             
         if input_name == "target_attention_mask":
             shape = [self.batch_size, self.sequence_length]
+            if framework == "pt":
+                return torch.full(shape, 1, dtype=DTYPE_MAPPER.pt(int_dtype))
             return self.constant_tensor(shape, value=1, framework=framework, dtype=int_dtype)
             
         if input_name == "source_attention_mask":
             shape = [self.batch_size, self.source_sequence_length]
+            if framework == "pt":
+                return torch.full(shape, 1, dtype=DTYPE_MAPPER.pt(int_dtype))
             return self.constant_tensor(shape, value=1, framework=framework, dtype=int_dtype)
 
         return super().generate(input_name, framework, int_dtype, float_dtype)
