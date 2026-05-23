@@ -1837,9 +1837,23 @@ class OVLTXPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, LTXPipel
 class OVModelLLMAdapter(OVPipelinePart):
     """OpenVINO wrapper for Anima LLM Adapter."""
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(
+        self,
+        source_hidden_states: torch.Tensor,
+        target_input_ids: torch.Tensor,
+        target_attention_mask: Optional[torch.Tensor] = None,
+        source_attention_mask: Optional[torch.Tensor] = None,
+    ):
         self.compile()
-        inputs = {"hidden_states": hidden_states}
+        inputs = {
+            "source_hidden_states": source_hidden_states,
+            "target_input_ids": target_input_ids,
+        }
+        if target_attention_mask is not None:
+            inputs["target_attention_mask"] = target_attention_mask
+        if source_attention_mask is not None:
+            inputs["source_attention_mask"] = source_attention_mask
+
         outputs = self.request(inputs, share_inputs=True)
         return torch.from_numpy(outputs[0])
 

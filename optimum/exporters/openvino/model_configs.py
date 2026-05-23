@@ -2968,15 +2968,55 @@ class LTXVideoTransformerOpenVINOConfig(SanaTransformerOpenVINOConfig):
         }
 
 
-class DummyAnimaAdapterInputGenerator(DummySeq2SeqDecoderTextInputGenerator):
-    """Generates float hidden states for the LLM Adapter."""
+class DummyAnimaAdapterInputGenerator(DummyInputGenerator):
+    """Generates dummy inputs for the Anima LLM Adapter."""
 
-    SUPPORTED_INPUT_NAMES = ("hidden_states",)
+    SUPPORTED_INPUT_NAMES = (
+        "source_hidden_states",
+        "target_input_ids",
+        "target_attention_mask",
+        "source_attention_mask",
+    )
+
+    def __init__(
+        self,
+        task: str,
+        normalized_config,
+        batch_size: int = 1,
+        sequence_length: int = 512,
+        source_sequence_length: int = 64,
+        **kwargs,
+    ):
+        super().__init__(task, normalized_config, **kwargs)
+        self.batch_size = batch_size
+        self.sequence_length = sequence_length
+        self.source_sequence_length = source_sequence_length
 
     def generate(self, input_name: str, framework: str = "pt", int_dtype: str = "int64", float_dtype: str = "fp32"):
-        if input_name == "hidden_states":
-            shape = [self.batch_size, self.sequence_length, self.normalized_config.hidden_size]
+        if input_name == "source_hidden_states":
+            source_dim = getattr(self.normalized_config, "source_dim", 1024)
+            shape = [self.batch_size, self.source_sequence_length, source_dim]
             return self.random_float_tensor(shape, framework=framework, dtype=float_dtype)
+        
+        if input_name == "target_input_ids":
+            target_vocab_size = getattr(self.normalized_config, "target_vocab_size", 32128)
+            shape = [self.batch_size, self.sequence_length]
+            return self.random_int_tensor(
+                shape,
+                min_value=0,
+                max_value=target_vocab_size - 1,
+                framework=framework,
+                dtype=int_dtype,
+            )
+            
+        if input_name == "target_attention_mask":
+            shape = [self.batch_size, self.sequence_length]
+            return self.constant_tensor(shape, value=1, framework=framework, dtype=int_dtype)
+            
+        if input_name == "source_attention_mask":
+            shape = [self.batch_size, self.source_sequence_length]
+            return self.constant_tensor(shape, value=1, framework=framework, dtype=int_dtype)
+
         return super().generate(input_name, framework, int_dtype, float_dtype)
 
 
@@ -3109,12 +3149,15 @@ class AnimaLLMAdapterOpenVINOConfig(OnnxConfig):
     @property
     def inputs(self) -> Dict[str, Dict[int, str]]:
         return {
-            "hidden_states": {0: "batch_size", 1: "sequence_length"},
+            "source_hidden_states": {0: "batch_size", 1: "source_sequence_length"},
+            "target_input_ids": {0: "batch_size", 1: "target_sequence_length"},
+            "target_attention_mask": {0: "batch_size", 1: "target_sequence_length"},
+            "source_attention_mask": {0: "batch_size", 1: "source_sequence_length"},
         }
 
     @property
     def outputs(self) -> Dict[str, Dict[int, str]]:
-        return {"sample": {0: "batch_size", 1: "sequence_length"}}
+        return {"prompt_embeds": {0: "batch_size", 1: "target_sequence_length"}}
 
 
 @register_in_tasks_manager("anima-vae-decoder", *["feature-extraction"], library_name="diffusers")
