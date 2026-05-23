@@ -1736,17 +1736,15 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, mode
     if hasattr(pipeline, "t5_tokenizer") and not hasattr(pipeline, "tokenizer_2"):
         pipeline.tokenizer_2 = pipeline.t5_tokenizer
 
-    # 2b. LLM Adapter (Linear)
+    # 2b. LLM Adapter (Linear / Text Conditioner)
     llm_adapter = getattr(pipeline, "llm_adapter", None)
     if llm_adapter is None and model_path:
         try:
-            print("DEBUG: Manually loading llm_adapter...", flush=True)
-            # LLM adapter is often a custom ModelMixin or similar
-            from diffusers.models.modeling_utils import ModelMixin
-            # This is a bit speculative as we don't know the exact class, 
-            # but usually it's stored in a subfolder.
+            from diffusers import AnimaTextConditioner
+            print("DEBUG: Manually loading llm_adapter (AnimaTextConditioner)...", flush=True)
+            llm_adapter = AnimaTextConditioner.from_pretrained(model_path, subfolder="text_conditioner")
         except Exception as e:
-            pass
+            print(f"DEBUG: Manual llm_adapter load failed: {e}", flush=True)
     
     print(f"DEBUG: llm_adapter found: {llm_adapter is not None}", flush=True)
     if llm_adapter is not None:
@@ -1764,24 +1762,33 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, mode
             export_config_constructor(adapter_config, int_dtype=int_dtype, float_dtype=float_dtype),
         )
 
-    # 3. Transformer (Anima DiT / MiniTrainDIT)
+    # 3. Transformer (Anima DiT / CosmosTransformer3DModel)
     transformer = getattr(pipeline, "transformer", None)
     if transformer is None and model_path:
         try:
-            from diffusers import WanTransformer3DModel
-            print("DEBUG: Manually loading transformer...", flush=True)
-            transformer = WanTransformer3DModel.from_pretrained(model_path, subfolder="transformer")
+            # Anima uses CosmosTransformer3DModel, which uses transformer_blocks prefix
+            from diffusers import CosmosTransformer3DModel
+            print("DEBUG: Manually loading transformer (CosmosTransformer3DModel)...", flush=True)
+            transformer = CosmosTransformer3DModel.from_pretrained(model_path, subfolder="transformer")
         except Exception as e:
             try:
-                # Try generic loading if specific class fails
-                from diffusers import ModelMixin
-                transformer = ModelMixin.from_pretrained(model_path, subfolder="transformer")
+                # Fallback to Wan if Cosmos fails
+                from diffusers import WanTransformer3DModel
+                print("DEBUG: Cosmos load failed, trying WanTransformer3DModel...", flush=True)
+                transformer = WanTransformer3DModel.from_pretrained(model_path, subfolder="transformer")
             except Exception as e2:
                 print(f"DEBUG: Manual transformer load failed: {e2}", flush=True)
     
     print(f"DEBUG: transformer found: {transformer is not None}", flush=True)
     if transformer is not None:
         try:
+            # Ensure joint_attention_dim exists for NormalizedConfig compatibility
+            if not hasattr(transformer.config, "joint_attention_dim"):
+                # For Cosmos, this is usually hidden_size or explicitly joint_attention_dim
+                inner_dim = getattr(transformer.config, "joint_attention_dim", getattr(transformer.config, "hidden_size", 1152))
+                transformer.config.joint_attention_dim = inner_dim
+                print(f"DEBUG: Set transformer.config.joint_attention_dim to {inner_dim}", flush=True)
+
             # Patch projection dimensions for IR compatibility
             transformer.config.text_encoder_projection_dim = getattr(
                 transformer.config,
@@ -1803,17 +1810,18 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, mode
         except Exception as e:
             print(f"DEBUG: transformer export setup failed: {e}", flush=True)
 
-    # 4. VAE Encoder & Decoder (WanVAE 3D Causal)
+    # 4. VAE Encoder & Decoder (WanVAE / AutoencoderKLQwenImage)
     vae = getattr(pipeline, "vae", None)
     if vae is None and model_path:
         try:
-            from diffusers import WanVAE
-            print("DEBUG: Manually loading vae...", flush=True)
-            vae = WanVAE.from_pretrained(model_path, subfolder="vae")
+            from diffusers import AutoencoderKLQwenImage
+            print("DEBUG: Manually loading vae (AutoencoderKLQwenImage)...", flush=True)
+            vae = AutoencoderKLQwenImage.from_pretrained(model_path, subfolder="vae")
         except Exception as e:
             try:
-                from diffusers import ModelMixin
-                vae = ModelMixin.from_pretrained(model_path, subfolder="vae")
+                from diffusers import WanVAE
+                print("DEBUG: AutoencoderKLQwenImage load failed, trying WanVAE...", flush=True)
+                vae = WanVAE.from_pretrained(model_path, subfolder="vae")
             except Exception as e2:
                 print(f"DEBUG: Manual vae load failed: {e2}", flush=True)
     
