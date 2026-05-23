@@ -2987,7 +2987,8 @@ class DummyAnimaAdapterInputGenerator(DummyInputGenerator):
         source_sequence_length: int = 64,
         **kwargs,
     ):
-        super().__init__(task, normalized_config, **kwargs)
+        self.task = task
+        self.normalized_config = normalized_config
         self.batch_size = batch_size
         self.sequence_length = sequence_length
         self.source_sequence_length = source_sequence_length
