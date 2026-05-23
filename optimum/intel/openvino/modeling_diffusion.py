@@ -635,7 +635,8 @@ class OVDiffusionPipeline(OVBaseModel, DiffusionPipeline):
             if name in kwargs:
                 submodels[name] = kwargs.pop(name)
             elif config.get(name, (None, None))[0] is not None:
-                module_name, module_class = config.get(name)
+                val = config.get(name)
+                module_name, module_class = val[0], val[1]
                 if hasattr(pipelines, module_name):
                     module = getattr(pipelines, module_name)
                 else:
@@ -1905,12 +1906,16 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
         """Intercept component registration to protect pre-loaded OpenVINO components from being modularly overwritten with None."""
         is_init = not getattr(self, "_ov_init_complete", False)
         saved_components = {}
+        saved_configs = {}
         
         if is_init:
+            config = getattr(self, "config", None)
             for name in kwargs:
                 current_val = getattr(self, name, None)
                 if current_val is not None:
                     saved_components[name] = current_val
+                if config is not None and name in config:
+                    saved_configs[name] = config[name]
 
         # Allow ModularPipeline.__init__ to execute all standard registrations
         super().register_components(**kwargs)
@@ -1921,7 +1926,10 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
                 if getattr(self, name, None) is None:
                     print(f"[Anima Debug] Restoring pre-loaded OV component: {name}={type(current_val).__name__}", flush=True)
                     setattr(self, name, current_val)
-                    self.register_to_config(**{name: (None, None, {})}) # Resync config
+                    if name in saved_configs:
+                        self.register_to_config(**{name: saved_configs[name]})
+                    else:
+                        self.register_to_config(**{name: (None, None, {})})
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

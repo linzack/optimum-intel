@@ -735,6 +735,8 @@ def _main_quantize(
             **(model_kwargs or {}),
         )
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         logger.warning(f"WARNING: Skipping final model reloading verification as export validation failed or some submodels are incomplete: {e}")
         return
 

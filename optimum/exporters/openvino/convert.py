@@ -930,7 +930,31 @@ def export_from_model(
         if safety_checker is not None:
             safety_checker.save_pretrained(output.joinpath("safety_checker"))
 
+        # For any components that were not saved because they are None in the modular pipeline,
+        # copy them from the source model_path if they exist there.
+        if model_path is not None:
+            import shutil
+            model_path_obj = Path(model_path)
+            for comp_name in list(model.config.keys()):
+                src_comp_path = model_path_obj / comp_name
+                dst_comp_path = output / comp_name
+                if src_comp_path.is_dir() and not dst_comp_path.exists():
+                    print(f"DEBUG: Copying modular component folder '{comp_name}' from {src_comp_path} to {dst_comp_path}", flush=True)
+                    shutil.copytree(src_comp_path, dst_comp_path)
+
         print(f"DEBUG: export_from_model saving config for model {type(model)} to {output}", flush=True)
+        if hasattr(model, "_component_specs"):
+            # Resolve null library/class_name from type hints for modular pipeline
+            for name in list(model.config.keys()):
+                val = model.config[name]
+                if isinstance(val, (list, tuple)) and len(val) == 3:
+                    library, class_name, spec_dict = val
+                    if (library is None or class_name is None) and isinstance(spec_dict, dict):
+                        type_hint = spec_dict.get("type_hint")
+                        if isinstance(type_hint, (list, tuple)) and len(type_hint) == 2:
+                            library, class_name = type_hint[0], type_hint[1]
+                            print(f"DEBUG: Resolving null library/class_name for '{name}' to ('{library}', '{class_name}')", flush=True)
+                            model.register_to_config(**{name: (library, class_name, spec_dict)})
         model.save_config(output)
         if library_name == "diffusers" and not (output / "model_index.json").exists():
             if (output / "modular_model_index.json").exists():
