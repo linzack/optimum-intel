@@ -89,13 +89,11 @@ def flattenize_inputs(inputs: List[Any]):
 def _get_input_info(
     model: Union["PreTrainedModel", "ModelMixin"], config: OnnxConfig, dummy_inputs: Dict[str, Any]
 ) -> List[InputInfo]:
-    sig = inspect.signature(model.forward) if hasattr(model, "forward") else inspect.signature(model.call)
     inputs = config.ordered_inputs(model)
-    ordered_dummy_inputs = {param: dummy_inputs[param] for param in sig.parameters if param in dummy_inputs}
-    if not ordered_dummy_inputs:
-        ordered_dummy_inputs = dummy_inputs
     ordered_input_names = list(inputs)
-    flatten_inputs = flattenize_inputs(ordered_dummy_inputs.values())
+    flatten_inputs = []
+    for name in ordered_input_names:
+        flatten_inputs.extend(flattenize_inputs([dummy_inputs[name]]))
     input_info = []
 
     name_to_symbol = {}
@@ -122,7 +120,8 @@ def _get_input_info(
                 else:
                     dim = Dimension(-1)
                 dim.set_symbol(symbol)
-                shape[idx] = dim
+                if idx < len(shape):
+                    shape[idx] = dim
         info = InputInfo(name=name, shape=shape, type=type, example=example)
         input_info.append(info)
     return input_info
