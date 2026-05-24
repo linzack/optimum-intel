@@ -436,6 +436,13 @@ class OVDiffusionPipeline(OVBaseModel, DiffusionPipeline):
             "add_watermarker": add_watermarker,
         }
 
+        # Dynamically support custom components (like t5_tokenizer, text_conditioner)
+        for key in list(kwargs.keys()):
+            if not hasattr(self, key):
+                val = kwargs.pop(key)
+                setattr(self, key, val)
+                all_pipeline_init_args[key] = val
+
         diffusers_pipeline_args = {}
         for key in inspect.signature(self.auto_model_class).parameters.keys():
             if key in all_pipeline_init_args:
@@ -631,6 +638,11 @@ class OVDiffusionPipeline(OVBaseModel, DiffusionPipeline):
             "safety_checker": None,
             "image_encoder": None,
         }
+        # Add all custom subcomponents from the config that are not part of the hardcoded list
+        # and are not OpenVINO model keys
+        for key in config.keys():
+            if not key.startswith("_") and key not in submodels and key not in file_names:
+                submodels[key] = None
         for name in submodels.keys():
             if name in kwargs:
                 submodels[name] = kwargs.pop(name)
@@ -1884,6 +1896,30 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
     main_input_name = "prompt"
     export_feature = "text-to-video"
     _library_name = "diffusers"
+
+    @property
+    def vae_scale_factor(self) -> int:
+        vae_scale_factor = 8
+        if getattr(self, "vae", None) is not None:
+            vae_config = getattr(self.vae, "config", None)
+            temperal_downsample = getattr(self.vae, "temperal_downsample", None)
+            if temperal_downsample is None and vae_config is not None:
+                temperal_downsample = getattr(vae_config, "temperal_downsample", None)
+            if temperal_downsample is not None:
+                try:
+                    vae_scale_factor = 2 ** len(temperal_downsample)
+                except Exception:
+                    pass
+        return vae_scale_factor
+
+    @property
+    def num_channels_latents(self) -> int:
+        num_channels_latents = 16
+        if getattr(self, "transformer", None) is not None:
+            config = getattr(self.transformer, "config", None)
+            if config is not None:
+                num_channels_latents = getattr(config, "in_channels", num_channels_latents)
+        return num_channels_latents
 
     @property
     def _component_names(self) -> List[str]:
