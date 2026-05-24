@@ -3071,7 +3071,7 @@ class AnimaVaeDummyInputGenerator(DummyVisionInputGenerator):
 class DummyAnimaTransformerInputGenerator(DummyVisionInputGenerator):
     """Input generator for Anima/Cosmos 3D coordinate tensors."""
 
-    SUPPORTED_INPUT_NAMES = ("hidden_states", "encoder_hidden_states", "img_ids", "txt_ids")
+    SUPPORTED_INPUT_NAMES = ("hidden_states", "encoder_hidden_states")
 
     def __init__(
         self,
@@ -3132,7 +3132,6 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
     DUMMY_INPUT_GENERATOR_CLASSES = (
         DummyTransformerTimestpsInputGenerator,
         DummyAnimaTransformerInputGenerator,
-        DummyFluxTextInputGenerator,
     )
     _MODEL_PATCHER = AnimaTransformerModelPatcher
 
@@ -3141,10 +3140,7 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
         return {
             "hidden_states": {0: "batch_size", 1: "num_channels", 2: "num_frames", 3: "height", 4: "width"},
             "timestep": {0: "batch_size"},
-            "guidance": {0: "batch_size"},
-            "encoder_hidden_states": {0: "batch_size", 1: "encoder_sequence_length"},
-            "img_ids": {0: "batch_size", 1: "sequence_length"} if is_diffusers_version(">=", "0.31.0") else {0: "sequence_length"},
-            "txt_ids": {0: "batch_size", 1: "encoder_sequence_length"} if is_diffusers_version(">=", "0.31.0") else {0: "encoder_sequence_length"},
+            "encoder_hidden_states": {0: "batch_size", 1: "encoder_sequence_length", 2: "hidden_dim"},
         }
 
     @property

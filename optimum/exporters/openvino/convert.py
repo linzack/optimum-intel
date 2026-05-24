@@ -379,6 +379,7 @@ def export_pytorch(
 
         # Check that inputs match, and order them properly
         dummy_inputs = config.generate_dummy_inputs(framework="pt", **input_shapes)
+        print(f"[Anima Debug] dummy_inputs keys+shapes: { {k: v.shape for k, v in dummy_inputs.items()} }", flush=True)
         device = torch.device(device)
         if device.type == "cuda" and torch.cuda.is_available():
             model.to(device)
@@ -460,6 +461,7 @@ def export_pytorch(
             except ValueError as e:
                 logger.warning(f"Ignored check_dummy_inputs_are_allowed ValueError: {e}")
             input_info = _get_input_info(model, config, dummy_inputs)
+            print(f"[Anima Debug] input_info: { [(i.name, i.shape) for i in input_info] }", flush=True)
             torch_export = os.getenv("OPENVINO_DYNAMO_EXPORT", "false").lower() == "true"
             if torch_export:
                 if hasattr(torch.ops, "_prepare_4d_causal_attention_mask_for_sdpa"):
