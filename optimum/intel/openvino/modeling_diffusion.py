@@ -1347,6 +1347,7 @@ class OVModelTextEncoder(OVPipelinePart):
         attention_mask: Optional[Union[np.ndarray, torch.Tensor]] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: bool = False,
+        **kwargs,
     ):
         self.compile()
         model_inputs = {"input_ids": input_ids}
@@ -1449,6 +1450,7 @@ class OVModelTransformer(OVPipelinePart):
         video_coords: Optional[torch.Tensor] = None,
         attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
+        **kwargs,
     ):
         self.compile()
 
@@ -1479,6 +1481,11 @@ class OVModelTransformer(OVPipelinePart):
             if not isinstance(rope_interpolation_scale, torch.Tensor):
                 rope_interpolation_scale = torch.tensor(rope_interpolation_scale)
             model_inputs["rope_interpolation_scale"] = rope_interpolation_scale
+
+        expected_inputs = {inp.get_any_name() for inp in self.model.inputs}
+        for key, value in kwargs.items():
+            if value is not None and key in expected_inputs:
+                model_inputs[key] = value
 
         ov_outputs = self.request(model_inputs, share_inputs=True).to_dict()
 
@@ -1517,6 +1524,7 @@ class OVModelVaeEncoder(OVPipelinePart):
         sample: Union[np.ndarray, torch.Tensor],
         generator: Optional[torch.Generator] = None,
         return_dict: bool = False,
+        **kwargs,
     ):
         self.compile()
 
@@ -1569,6 +1577,7 @@ class OVModelVaeDecoder(OVPipelinePart):
         timestep: Optional[Union[np.ndarray, torch.Tensor]] = None,
         generator: Optional[torch.Generator] = None,
         return_dict: bool = False,
+        **kwargs,
     ):
         self.compile()
 
@@ -1874,6 +1883,7 @@ class OVModelLLMAdapter(OVPipelinePart):
         target_input_ids: torch.Tensor,
         target_attention_mask: Optional[torch.Tensor] = None,
         source_attention_mask: Optional[torch.Tensor] = None,
+        **kwargs,
     ):
         self.compile()
         inputs = {
