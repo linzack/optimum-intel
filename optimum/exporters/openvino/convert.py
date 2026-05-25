@@ -474,6 +474,25 @@ def export_pytorch(
                 logger.warning(f"Ignored check_dummy_inputs_are_allowed ValueError: {e}")
             input_info = _get_input_info(model, config, dummy_inputs)
             print(f"[Anima Debug] input_info: { [(i.name, i.shape) for i in input_info] }", flush=True)
+            # Verify Rank shape proactively to prevent runtime/xml bugs
+            if "encoder_hidden_states" in dummy_inputs:
+                enc_shape = dummy_inputs["encoder_hidden_states"].shape
+                if len(enc_shape) != 3:
+                    print(f"[Anima Warning] encoder_hidden_states has RANK {len(enc_shape)} ({enc_shape})! Expected Rank-3 [batch, seq, dim].", flush=True)
+                else:
+                    print(f"[Anima Success] Verified encoder_hidden_states is Rank-3: {enc_shape}", flush=True)
+            if "sample" in dummy_inputs and model.__class__.__name__ == "AutoencoderKLQwenImage":
+                vae_shape = dummy_inputs["sample"].shape
+                if len(vae_shape) == 5 and vae_shape[2] > 1:
+                    print(f"[Anima Warning] VAE Encoder is tracing with T={vae_shape[2]} frames ({vae_shape})! This may cause ParameterMismatch during inference. Recommend T=1.", flush=True)
+                else:
+                    print(f"[Anima Success] Verified VAE Encoder is tracing with T=1 frame: {vae_shape}", flush=True)
+            if "latent_sample" in dummy_inputs and model.__class__.__name__ == "AutoencoderKLQwenImage":
+                vae_shape = dummy_inputs["latent_sample"].shape
+                if len(vae_shape) == 5 and vae_shape[2] > 1:
+                    print(f"[Anima Warning] VAE Decoder is tracing with T={vae_shape[2]} frames ({vae_shape})! This may cause ParameterMismatch during inference. Recommend T=1.", flush=True)
+                else:
+                    print(f"[Anima Success] Verified VAE Decoder is tracing with T=1 frame: {vae_shape}", flush=True)
             torch_export = os.getenv("OPENVINO_DYNAMO_EXPORT", "false").lower() == "true"
             if torch_export:
                 if hasattr(torch.ops, "_prepare_4d_causal_attention_mask_for_sdpa"):

@@ -3038,7 +3038,7 @@ class AnimaVaeDummyInputGenerator(DummyVisionInputGenerator):
         num_channels: int = 3,
         width: int = 64,
         height: int = 64,
-        num_frames: int = 2,
+        num_frames: int = 1,
         **kwargs,
     ):
         self.task = task
