@@ -378,6 +378,18 @@ def export_pytorch(
             input_shapes = {}  # will use the defaults from DEFAULT_DUMMY_SHAPES
 
         # Check that inputs match, and order them properly
+        print(f"[Anima Debug] Exporting model: {model.__class__.__name__}", flush=True)
+        print(f"[Anima Debug] Config Class: {config.__class__.__module__}.{config.__class__.__name__}", flush=True)
+        print(f"[Anima Debug] Config inheritance MRO: {[c.__name__ for c in config.__class__.__mro__]}", flush=True)
+        if hasattr(config, "DUMMY_INPUT_GENERATOR_CLASSES"):
+            print(f"[Anima Debug] DUMMY_INPUT_GENERATOR_CLASSES: {[cls.__name__ for cls in config.DUMMY_INPUT_GENERATOR_CLASSES]}", flush=True)
+        try:
+            generators = config._create_dummy_input_generator_classes()
+            print(f"[Anima Debug] Instantiated generators: {[g.__class__.__name__ for g in generators]}", flush=True)
+            for gen in generators:
+                print(f"[Anima Debug] Generator {gen.__class__.__name__} supported inputs: {getattr(gen, 'SUPPORTED_INPUT_NAMES', 'Unknown')}", flush=True)
+        except Exception as e:
+            print(f"[Anima Debug] Failed to trace generator list: {e}", flush=True)
         dummy_inputs = config.generate_dummy_inputs(framework="pt", **input_shapes)
         print(f"[Anima Debug] dummy_inputs keys+shapes: { {k: v.shape for k, v in dummy_inputs.items()} }", flush=True)
         device = torch.device(device)

@@ -3071,7 +3071,7 @@ class AnimaVaeDummyInputGenerator(DummyVisionInputGenerator):
 class DummyAnimaTransformerInputGenerator(DummyVisionInputGenerator):
     """Input generator for Anima/Cosmos 3D coordinate tensors."""
 
-    SUPPORTED_INPUT_NAMES = ("hidden_states", "encoder_hidden_states")
+    SUPPORTED_INPUT_NAMES = ("hidden_states",)
 
     def __init__(
         self,
@@ -3103,13 +3103,6 @@ class DummyAnimaTransformerInputGenerator(DummyVisionInputGenerator):
                 dtype=float_dtype,
             )
 
-        if input_name == "encoder_hidden_states":
-            return self.random_float_tensor(
-                [self.batch_size, 512, getattr(self.normalized_config, "text_encoder_projection_dim", 1152)],
-                framework=framework,
-                dtype=float_dtype,
-            )
-
         if input_name == "img_ids":
             img_ids = torch.zeros((num_patches, 3), dtype=torch.float32)
             if is_diffusers_version(">=", "0.31.0"):
@@ -3125,6 +3118,23 @@ class DummyAnimaTransformerInputGenerator(DummyVisionInputGenerator):
         return super().generate(input_name, framework, int_dtype, float_dtype)
 
 
+class DummyAnimaEncoderHiddenStatesGenerator(DummySeq2SeqDecoderTextInputGenerator):
+    """Input generator for Anima encoder_hidden_states with explicit 3D batch shape."""
+
+    SUPPORTED_INPUT_NAMES = ("encoder_hidden_states",)
+
+    def generate(self, input_name: str, framework: str = "pt", int_dtype: str = "int64", float_dtype: str = "fp32"):
+        if input_name == "encoder_hidden_states":
+            projection_dim = getattr(self.normalized_config, "text_encoder_projection_dim", 1152)
+            # Generate correct 3D shape [batch_size, sequence_length (512), projection_dim]
+            return self.random_float_tensor(
+                [self.batch_size, 512, projection_dim],
+                framework=framework,
+                dtype=float_dtype,
+            )
+        return super().generate(input_name, framework, int_dtype, float_dtype)
+
+
 @register_in_tasks_manager("anima-transformer-3d", *["feature-extraction"], library_name="diffusers")
 class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
     """Config for Anima 3D Transformer export."""
@@ -3132,8 +3142,36 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
     DUMMY_INPUT_GENERATOR_CLASSES = (
         DummyTransformerTimestpsInputGenerator,
         DummyAnimaTransformerInputGenerator,
+        DummyAnimaEncoderHiddenStatesGenerator,
     )
     _MODEL_PATCHER = AnimaTransformerModelPatcher
+
+    def generate_dummy_inputs(self, framework: str = "pt", **kwargs):
+        import torch
+        dummy_inputs = {}
+        batch_size = kwargs.get("batch_size", 2)
+        
+        # 1. hidden_states: [batch_size, num_channels (16), num_frames (2), height (64), width (64)]
+        dummy_inputs["hidden_states"] = torch.randn(
+            (batch_size, 16, 2, 64, 64),
+            dtype=torch.float32
+        )
+        
+        # 2. timestep: [batch_size]
+        dummy_inputs["timestep"] = torch.randint(
+            0, 1000,
+            (batch_size,),
+            dtype=torch.int64 if framework == "pt" else torch.float32
+        )
+        
+        # 3. encoder_hidden_states: [batch_size, sequence_length (512), projection_dim (1152)]
+        projection_dim = getattr(self._normalized_config, "text_encoder_projection_dim", 1152)
+        dummy_inputs["encoder_hidden_states"] = torch.randn(
+            (batch_size, 512, projection_dim),
+            dtype=torch.float32
+        )
+        
+        return dummy_inputs
 
     @property
     def inputs(self) -> Dict[str, Dict[int, str]]:
