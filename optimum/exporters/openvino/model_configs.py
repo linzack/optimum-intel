@@ -3171,6 +3171,13 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
             dtype=torch.float32
         )
         
+        # 4. padding_mask: [1, 1, latent_height, latent_width]
+        _, _, _, latent_h, latent_w = dummy_inputs["hidden_states"].shape
+        dummy_inputs["padding_mask"] = torch.ones(
+            (1, 1, latent_h, latent_w),
+            dtype=torch.float32
+        )
+
         return dummy_inputs
 
     @property
@@ -3179,6 +3186,7 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
             "hidden_states": {0: "batch_size", 1: "num_channels", 2: "num_frames", 3: "height", 4: "width"},
             "timestep": {0: "batch_size"},
             "encoder_hidden_states": {0: "batch_size", 1: "encoder_sequence_length", 2: "hidden_dim"},
+            "padding_mask": {2: "height", 3: "width"},
         }
 
     @property

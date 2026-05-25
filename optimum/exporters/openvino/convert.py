@@ -1912,9 +1912,13 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, mode
             import functools
 
             def make_patched_forward(orig_fw, signature):
+                has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
                 @functools.wraps(orig_fw)
                 def patched_forward(self, *args, **kwargs):
-                    filtered_kwargs = {k: v for k, v in kwargs.items() if k in signature.parameters}
+                    if has_var_keyword:
+                        filtered_kwargs = kwargs
+                    else:
+                        filtered_kwargs = {k: v for k, v in kwargs.items() if k in signature.parameters}
                     return orig_fw(self, *args, **filtered_kwargs)
                 return patched_forward
 

@@ -9905,7 +9905,7 @@ class AnimaAttentionProcessor(nn.Module):
         self.is_cross = is_cross
         self.rope = AnimaEmbedRope(head_dim)
 
-    def __call__(self, attn, hidden_states, encoder_hidden_states=None, **kwargs):
+    def __call__(self, attn, hidden_states, encoder_hidden_states=None, image_rotary_emb=None, img_ids=None, txt_ids=None, **kwargs):
         batch_size = hidden_states.shape[0]
         query = attn.to_q(hidden_states)
         key = attn.to_k(encoder_hidden_states if self.is_cross else hidden_states)
@@ -9927,13 +9927,10 @@ class AnimaAttentionProcessor(nn.Module):
         query, key, value = map(reshape_heads, (query, key, value))
 
         if not self.is_cross:
-            image_rotary_emb = kwargs.get("image_rotary_emb")
             if image_rotary_emb is not None:
                 query = apply_rotary_emb_qwen(query, image_rotary_emb, use_real=True, use_real_unbind_dim=-2)
                 key = apply_rotary_emb_qwen(key, image_rotary_emb, use_real=True, use_real_unbind_dim=-2)
             else:
-                img_ids = kwargs.get("img_ids")
-                txt_ids = kwargs.get("txt_ids")
                 if img_ids is not None:
                     query, key = self.rope(query, key, img_ids, txt_ids)
 

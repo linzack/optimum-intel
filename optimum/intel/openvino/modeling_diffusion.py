@@ -1483,9 +1483,16 @@ class OVModelTransformer(OVPipelinePart):
             model_inputs["rope_interpolation_scale"] = rope_interpolation_scale
 
         expected_inputs = {inp.get_any_name() for inp in self.model.inputs}
+        print(f"[OV forward] expected_inputs: {expected_inputs}", flush=True)
+        print(f"[OV forward] kwargs keys: {list(kwargs.keys())}", flush=True)
         for key, value in kwargs.items():
             if value is not None and key in expected_inputs:
                 model_inputs[key] = value
+        pm = model_inputs.get("padding_mask")
+        if pm is not None:
+            print(f"[OV forward] padding_mask: shape={pm.shape} dtype={pm.dtype} unique={pm.unique()}", flush=True)
+        else:
+            print("[OV forward] WARNING: padding_mask NOT in model_inputs", flush=True)
 
         ov_outputs = self.request(model_inputs, share_inputs=True).to_dict()
 
@@ -2013,26 +2020,39 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
         tokenizer_max_length: int = -1,
         num_frames: int = -1,
     ):
-        # Anima/Cosmos specific coordinate generation logic
-        shapes = {}
-        batch_size *= num_images_per_prompt
-        # Anima 5D VAE compression is 8x8x8
-        height //= 8
-        width //= 8
-        if num_frames is None or num_frames < 0:
-            num_frames = 1
-        num_frames = (num_frames - 1) // 8 + 1
-        packed_height_width = height * width * num_frames
+        # 1. Handle dynamic axes guards to avoid -1 * -1 = 1 silent static lock
+        if batch_size == -1 or num_images_per_prompt == -1:
+            batch_size = -1
+        else:
+            batch_size *= num_images_per_prompt
 
+        # 2. Handle dynamic spatial dimensions to avoid -1 // 8 * -1 // 8 = 1 static lock
+        if height == -1 or width == -1:
+            packed_height_width = -1
+        else:
+            height //= 8
+            width //= 8
+            if num_frames is None or num_frames < 0:
+                num_frames = 1
+            num_frames = (num_frames - 1) // 8 + 1
+            packed_height_width = height * width * num_frames
+
+        shapes = {}
         for inputs in model.inputs:
             name = inputs.get_any_name()
             if name == "img_ids":
                 shapes[inputs] = [packed_height_width, 3]
             elif name == "txt_ids":
                 shapes[inputs] = [-1, 3]
+            elif name == "padding_mask":
+                # padding_mask batch dimension must always be 1 to match the pipeline tensor shape
+                # Spatial axes are dynamic (-1)
+                shapes[inputs] = [1, 1, -1, -1]
+                print(f"[reshape] padding_mask forced to [1, 1, -1, -1]", flush=True)
             else:
                 shapes[inputs] = inputs.get_partial_shape()
                 shapes[inputs][0] = batch_size
+        print(f"[reshape] final shapes: { {k.get_any_name(): v for k, v in shapes.items()} }", flush=True)
         model.reshape(shapes)
         return model
 
