@@ -3132,7 +3132,6 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
     DUMMY_INPUT_GENERATOR_CLASSES = (
         DummyTransformerTimestpsInputGenerator,
         DummyAnimaTransformerInputGenerator,
-        DummyFluxTextInputGenerator,
     )
     _MODEL_PATCHER = AnimaTransformerModelPatcher
 
