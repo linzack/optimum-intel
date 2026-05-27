@@ -2968,8 +2968,8 @@ class LTXVideoTransformerOpenVINOConfig(SanaTransformerOpenVINOConfig):
         }
 
 
-class DummyAnimaAdapterInputGenerator(DummyInputGenerator):
-    """Generates dummy inputs for the Anima LLM Adapter."""
+class DummyAnimaTextConditionerInputGenerator(DummyInputGenerator):
+    """Generates dummy inputs for the Anima Text Conditioner."""
 
     SUPPORTED_INPUT_NAMES = (
         "source_hidden_states",
@@ -3194,11 +3194,11 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
         return {"sample": {0: "batch_size", 1: "num_channels", 2: "num_frames", 3: "height", 4: "width"}}
 
 
-@register_in_tasks_manager("anima-llm-adapter", *["feature-extraction"], library_name="diffusers")
-class AnimaLLMAdapterOpenVINOConfig(OnnxConfig):
-    """Config for Anima LLM Adapter export."""
+@register_in_tasks_manager("anima-text-conditioner", *["feature-extraction"], library_name="diffusers")
+class AnimaTextConditionerOpenVINOConfig(OnnxConfig):
+    """Config for Anima Text Conditioner export."""
 
-    DUMMY_INPUT_GENERATOR_CLASSES = (DummyAnimaAdapterInputGenerator,)
+    DUMMY_INPUT_GENERATOR_CLASSES = (DummyAnimaTextConditionerInputGenerator,)
     NORMALIZED_CONFIG_CLASS = NormalizedConfig
 
     @property

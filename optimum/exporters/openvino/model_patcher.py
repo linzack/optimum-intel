@@ -9905,7 +9905,7 @@ class AnimaAttentionProcessor(nn.Module):
         self.is_cross = is_cross
         self.rope = AnimaEmbedRope(head_dim)
 
-    def __call__(self, attn, hidden_states, encoder_hidden_states=None, image_rotary_emb=None, img_ids=None, txt_ids=None, **kwargs):
+    def __call__(self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, image_rotary_emb=None, img_ids=None, txt_ids=None, **kwargs):
         batch_size = hidden_states.shape[0]
         query = attn.to_q(hidden_states)
         key = attn.to_k(encoder_hidden_states if self.is_cross else hidden_states)
@@ -9926,6 +9926,16 @@ class AnimaAttentionProcessor(nn.Module):
 
         query, key, value = map(reshape_heads, (query, key, value))
 
+        if getattr(attn, "norm_q", None) is not None:
+            query = attn.norm_q(query)
+        if getattr(attn, "norm_k", None) is not None:
+            key = attn.norm_k(key)
+
+        # Handle Grouped Query Attention (GQA) repeating
+        if key.shape[2] != query.shape[2]:
+            key = key.repeat_interleave(query.shape[2] // key.shape[2], dim=2)
+            value = value.repeat_interleave(query.shape[2] // value.shape[2], dim=2)
+
         if not self.is_cross:
             if image_rotary_emb is not None:
                 query = apply_rotary_emb_qwen(query, image_rotary_emb, use_real=True, use_real_unbind_dim=-2)
@@ -9941,6 +9951,8 @@ class AnimaAttentionProcessor(nn.Module):
         hidden_states = F.scaled_dot_product_attention(query, key, value)
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, heads * head_dim)
         hidden_states = attn.to_out[0](hidden_states)
+        if len(attn.to_out) > 1:
+            hidden_states = attn.to_out[1](hidden_states)
 
         # Log shapes after output projection
         print(f"[Anima Debug] After - hidden_states: {hidden_states.shape}")

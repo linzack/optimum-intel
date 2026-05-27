@@ -642,7 +642,8 @@ class OVDiffusionPipeline(OVBaseModel, DiffusionPipeline):
         # and are not OpenVINO model keys
         for key in config.keys():
             if not key.startswith("_") and key not in submodels and key not in file_names:
-                submodels[key] = None
+                if key != "text_conditioner":
+                    submodels[key] = None
         for name in submodels.keys():
             if name in kwargs:
                 submodels[name] = kwargs.pop(name)
@@ -1881,8 +1882,8 @@ class OVLTXPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, LTXPipel
     auto_model_class = LTXPipeline
 
 
-class OVModelLLMAdapter(OVPipelinePart):
-    """OpenVINO wrapper for Anima LLM Adapter."""
+class OVModelTextConditioner(OVPipelinePart):
+    """OpenVINO wrapper for Anima Text Conditioner."""
 
     def forward(
         self,
@@ -1941,16 +1942,16 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
     @property
     def _component_names(self) -> List[str]:
         names = super()._component_names
-        if getattr(self, "llm_adapter", None) is not None:
-            names = names + ["llm_adapter"]
+        if getattr(self, "text_conditioner", None) is not None and hasattr(self.text_conditioner, "clear_requests"):
+            names = names + ["text_conditioner"]
         return names
 
     @property
     def _ov_model_paths(self) -> Dict[str, str]:
         paths = {}
         for name in self._ov_model_names:
-            if name == "llm_adapter":
-                paths["llm_adapter"] = "llm_adapter/openvino_model.xml"
+            if name == "text_conditioner":
+                paths["text_conditioner"] = "text_conditioner/openvino_model.xml"
             else:
                 paths[name] = self._all_ov_model_paths[name]
         return paths
@@ -2078,11 +2079,11 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
         if "library_name" not in kwargs:
             kwargs["library_name"] = "diffusers"
         pipeline = super().from_pretrained(model_id, **kwargs)
-        adapter_path = Path(model_id) / "llm_adapter" / "openvino_model.xml"
+        adapter_path = Path(model_id) / "text_conditioner" / "openvino_model.xml"
         if adapter_path.exists():
             ov_model = core.read_model(adapter_path)
-            pipeline.llm_adapter = OVModelLLMAdapter(ov_model, pipeline, "llm_adapter")
-            pipeline._internal_dict["llm_adapter"] = ("optimum", "OVModelLLMAdapter")
+            pipeline.text_conditioner = OVModelTextConditioner(ov_model, pipeline, "text_conditioner")
+            pipeline._internal_dict["text_conditioner"] = ("optimum", "OVModelTextConditioner")
         return pipeline
 
 

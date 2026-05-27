@@ -1255,7 +1255,7 @@ def get_diffusion_models_for_export_ext(
 ):
     is_anima = (
         pipeline.__class__.__name__.startswith("Anima")
-        or (pipeline.__class__.__name__.startswith("Cosmos") and hasattr(pipeline, "llm_adapter"))
+        or (pipeline.__class__.__name__.startswith("Cosmos") and hasattr(pipeline, "text_conditioner"))
     )
     print(f"DEBUG: get_diffusion_models_for_export_ext pipeline={type(pipeline)}, is_anima={is_anima}, model_path={model_path}", flush=True)
     if is_anima:
@@ -1831,19 +1831,19 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, mode
     if hasattr(pipeline, "t5_tokenizer") and not hasattr(pipeline, "tokenizer_2"):
         pipeline.tokenizer_2 = pipeline.t5_tokenizer
 
-    # 2b. LLM Adapter (Linear / Text Conditioner)
-    llm_adapter = getattr(pipeline, "llm_adapter", None)
-    if llm_adapter is None and model_path:
+    # 2b. Text Conditioner
+    text_conditioner = getattr(pipeline, "text_conditioner", None)
+    if text_conditioner is None and model_path:
         try:
             from diffusers import AnimaTextConditioner
-            print("DEBUG: Manually loading llm_adapter (AnimaTextConditioner)...", flush=True)
-            llm_adapter = AnimaTextConditioner.from_pretrained(model_path, subfolder="text_conditioner")
+            print("DEBUG: Manually loading text_conditioner (AnimaTextConditioner)...", flush=True)
+            text_conditioner = AnimaTextConditioner.from_pretrained(model_path, subfolder="text_conditioner")
         except Exception as e:
-            print(f"DEBUG: Manual llm_adapter load failed: {e}", flush=True)
+            print(f"DEBUG: Manual text_conditioner load failed: {e}", flush=True)
     
-    print(f"DEBUG: llm_adapter found: {llm_adapter is not None}", flush=True)
-    if llm_adapter is not None:
-        klass = llm_adapter.__class__
+    print(f"DEBUG: text_conditioner found: {text_conditioner is not None}", flush=True)
+    if text_conditioner is not None:
+        klass = text_conditioner.__class__
         if not getattr(klass, "_patched_for_export", False):
             import inspect
             import functools
@@ -1859,17 +1859,17 @@ def get_anima_models_for_export(pipeline, exporter, int_dtype, float_dtype, mode
             klass.forward = patched_forward
             klass._patched_for_export = True
 
-        adapter_config = getattr(llm_adapter, "config", PretrainedConfig())
+        conditioner_config = getattr(text_conditioner, "config", PretrainedConfig())
         export_config_constructor = TasksManager.get_exporter_config_constructor(
-            model=llm_adapter,
+            model=text_conditioner,
             exporter=exporter,
             library_name="diffusers",
             task="feature-extraction",
-            model_type="anima-llm-adapter",
+            model_type="anima-text-conditioner",
         )
-        models_for_export["llm_adapter"] = (
-            llm_adapter,
-            export_config_constructor(adapter_config, int_dtype=int_dtype, float_dtype=float_dtype),
+        models_for_export["text_conditioner"] = (
+            text_conditioner,
+            export_config_constructor(conditioner_config, int_dtype=int_dtype, float_dtype=float_dtype),
         )
 
     # 3. Transformer (Anima DiT / CosmosTransformer3DModel)
