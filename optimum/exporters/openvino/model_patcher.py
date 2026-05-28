@@ -9948,6 +9948,10 @@ class AnimaAttentionProcessor(nn.Module):
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
+        if attention_mask is not None:
+            if attention_mask.dtype not in {torch.bool, torch.float32, torch.float16, torch.bfloat16}:
+                attention_mask = attention_mask.to(torch.bool)
+
         hidden_states = F.scaled_dot_product_attention(query, key, value, attn_mask=attention_mask)
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, heads * head_dim)
         hidden_states = attn.to_out[0](hidden_states)

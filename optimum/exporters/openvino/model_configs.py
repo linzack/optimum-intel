@@ -3178,6 +3178,12 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
             dtype=torch.float32
         )
 
+        # 5. attention_mask: [batch_size, sequence_length (512)]
+        dummy_inputs["attention_mask"] = torch.ones(
+            (batch_size, 512),
+            dtype=torch.int64 if framework == "pt" else torch.float32
+        )
+
         return dummy_inputs
 
     @property
@@ -3186,6 +3192,7 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
             "hidden_states": {0: "batch_size", 1: "num_channels", 2: "num_frames", 3: "height", 4: "width"},
             "timestep": {0: "batch_size"},
             "encoder_hidden_states": {0: "batch_size", 1: "encoder_sequence_length", 2: "hidden_dim"},
+            "attention_mask": {0: "batch_size", 1: "encoder_sequence_length"},
             "padding_mask": {2: "height", 3: "width"},
         }
 
