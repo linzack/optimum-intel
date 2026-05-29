@@ -1501,6 +1501,10 @@ class OVModelTransformer(OVPipelinePart):
         for key, value in ov_outputs.items():
             model_outputs[next(iter(key.names))] = torch.from_numpy(value)
 
+        # Trace and log numerical output properties
+        out_tensor = next(iter(model_outputs.values()))
+        print(f"[oanima] Transformer output shape: {out_tensor.shape} | dtype: {out_tensor.dtype} | mean: {out_tensor.mean().item():.6f} | std: {out_tensor.std().item():.6f}", flush=True)
+
         if return_dict:
             return model_outputs
 
@@ -1901,6 +1905,27 @@ class OVModelTextConditioner(OVPipelinePart):
             print(f"  -> target_attention_mask shape: {target_attention_mask.shape} | dtype: {target_attention_mask.dtype}", flush=True)
         if source_attention_mask is not None:
             print(f"  -> source_attention_mask shape: {source_attention_mask.shape} | dtype: {source_attention_mask.dtype}", flush=True)
+
+        # Check and pad inputs to a minimum sequence length of 4 to prevent OpenVINO shape-1 NaN propagation
+        min_len = 4
+        
+        # 1. source_hidden_states: [B, S, D] and source_attention_mask: [B, S]
+        S = source_hidden_states.shape[1]
+        if S < min_len:
+            pad_len = min_len - S
+            source_hidden_states = torch.nn.functional.pad(source_hidden_states, (0, 0, 0, pad_len))
+            if source_attention_mask is None:
+                source_attention_mask = torch.ones((source_hidden_states.shape[0], S), dtype=torch.int64, device=source_hidden_states.device)
+            source_attention_mask = torch.nn.functional.pad(source_attention_mask, (0, pad_len), value=0)
+                
+        # 2. target_input_ids: [B, T] and target_attention_mask: [B, T]
+        T = target_input_ids.shape[1]
+        if T < min_len:
+            pad_len = min_len - T
+            target_input_ids = torch.nn.functional.pad(target_input_ids, (0, pad_len), value=0)
+            if target_attention_mask is None:
+                target_attention_mask = torch.ones((target_input_ids.shape[0], T), dtype=torch.int64, device=target_input_ids.device)
+            target_attention_mask = torch.nn.functional.pad(target_attention_mask, (0, pad_len), value=0)
 
         inputs = {
             "source_hidden_states": source_hidden_states,
