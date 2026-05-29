@@ -18,6 +18,7 @@ import logging
 import logging as log
 import math
 import types
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -75,22 +76,27 @@ class AnimaEmbedRope(nn.Module):
         # text tokens do not receive spatial 3D-RoPE embeddings. They rely on
         # absolute embeddings applied earlier in the text encoder stream.
 
-        def get_cos_sin(ids, dim):
-            inv_freq = 1.0 / (self.theta ** (torch.arange(0, dim, 2).float() / dim))
-            freqs = torch.einsum("...i,j->...ij", ids.float(), inv_freq.to(ids.device))
-            cos = freqs.cos().repeat_interleave(2, dim=-1)
-            sin = freqs.sin().repeat_interleave(2, dim=-1)
-            return cos, sin
+        # Correctly reconstruct [dim // 2] frequencies to support split-halves duplication
+        def get_freqs(ids, dim):
+            inv_freq = 1.0 / (self.theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=ids.device) / dim))
+            freqs = torch.einsum("...i,j->...ij", ids.float(), inv_freq)
+            return freqs
 
-        # ids shape: [S, 3] -> (T, H, W)
         t_ids, h_ids, w_ids = img_ids.unbind(-1)
-        cos_t, sin_t = get_cos_sin(t_ids.unsqueeze(-1), self.dim_t)
-        cos_h, sin_h = get_cos_sin(h_ids.unsqueeze(-1), self.dim_h)
-        cos_w, sin_w = get_cos_sin(w_ids.unsqueeze(-1), self.dim_w)
+        freqs_t = get_freqs(t_ids, self.dim_t)
+        freqs_h = get_freqs(h_ids, self.dim_h)
+        freqs_w = get_freqs(w_ids, self.dim_w)
 
-        # Concatenation order: (H, W, T)
-        cos = torch.cat((cos_h, cos_w, cos_t), dim=-1)
-        sin = torch.cat((sin_h, sin_w, sin_t), dim=-1)
+        # Concatenate in (T, H, W) order and duplicate as matching halves
+        freqs = torch.cat((freqs_t, freqs_h, freqs_w), dim=-1)
+        freqs = torch.cat((freqs, freqs), dim=-1)
+        cos = freqs.cos()
+        sin = freqs.sin()
+
+        # Gated Probe B: Custom RoPE Coordinate Verification
+        if os.environ.get("ANIMA_DEBUG") == "1":
+            tag = "danima" if q.is_cuda else "oanima"
+            print(f"[{tag}] [Probe B] RoPE cos mean: {cos.mean().item():.6f} | sin mean: {sin.mean().item():.6f}", flush=True)
 
         # Apply Rotary Embeddings (use_real_unbind_dim=-2)
         q = apply_rotary_emb_qwen(q, (cos, sin), use_real=True, use_real_unbind_dim=-2)
@@ -9872,6 +9878,9 @@ class AnimaTransformerModelPatcher(ModelPatcher):
     def __enter__(self):
         super().__enter__()
         self.original_processors = {}
+        self.original_forward = self._model.forward
+        self.original_rope = self._model.rope
+
         head_dim = getattr(self._model.config, "head_dim", None)
         if head_dim is None and hasattr(self._model.config, "get"):
             head_dim = self._model.config.get("head_dim", 64)
@@ -9880,16 +9889,69 @@ class AnimaTransformerModelPatcher(ModelPatcher):
             num_attention_heads = getattr(self._model.config, "num_attention_heads", 16)
             head_dim = hidden_size // num_attention_heads
 
+        # Patch parent model forward to accept dynamic coordinate inputs during export tracing
+        def patched_forward(
+            model_self,
+            hidden_states,
+            timestep,
+            encoder_hidden_states,
+            block_controlnet_hidden_states=None,
+            attention_mask=None,
+            fps=None,
+            condition_mask=None,
+            padding_mask=None,
+            return_dict=True,
+            img_ids=None,
+            txt_ids=None,
+        ):
+            model_self._current_img_ids = img_ids
+            model_self._current_txt_ids = txt_ids
+            return self.original_forward(
+                hidden_states=hidden_states,
+                timestep=timestep,
+                encoder_hidden_states=encoder_hidden_states,
+                block_controlnet_hidden_states=block_controlnet_hidden_states,
+                attention_mask=attention_mask,
+                fps=fps,
+                condition_mask=condition_mask,
+                padding_mask=padding_mask,
+                return_dict=return_dict,
+            )
+
+        self._model.forward = patched_forward.__get__(self._model, self._model.__class__)
+
+        # Disable native constant-folding rope by returning None, forcing AnimaAttentionProcessor's else branch
+        self._model._modules.pop("rope", None)
+        self._model.rope = lambda *args, **kwargs: None
+
         for name, module in self._model.named_modules():
             if "attn" in name and hasattr(module, "processor"):
                 self.original_processors[name] = module.processor
                 is_cross = "attn2" in name
+
+                # Extract layer index from name, e.g. "transformer_blocks.0.attn1" -> 0
+                layer_idx = -1
+                parts = name.split(".")
+                for p in parts:
+                    if p.isdigit():
+                        layer_idx = int(p)
+                        break
+
                 module._modules.pop("processor", None)  # Bypass PyTorch submodule type checking
-                module.processor = AnimaAttentionProcessor(head_dim, is_cross=is_cross)
+                proc = AnimaAttentionProcessor(head_dim, is_cross=is_cross, parent_model=self._model)
+                proc.layer_idx = layer_idx
+                module.processor = proc
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         super().__exit__(exc_type, exc_val, exc_tb)
+        self._model.forward = self.original_forward
+        self._model._modules.pop("rope", None)
+        self._model.rope = self.original_rope
+        if hasattr(self._model, "_current_img_ids"):
+            del self._model._current_img_ids
+        if hasattr(self._model, "_current_txt_ids"):
+            del self._model._current_txt_ids
         for name, processor in self.original_processors.items():
             submod = self._model.get_submodule(name)
             submod._modules.pop("processor", None)  # Bypass PyTorch submodule type checking
@@ -9899,10 +9961,11 @@ class AnimaTransformerModelPatcher(ModelPatcher):
 class AnimaAttentionProcessor(nn.Module):
     """Attention processor for Anima/Cosmos (handles self and cross)."""
 
-    def __init__(self, head_dim: int, is_cross: bool = False):
+    def __init__(self, head_dim: int, is_cross: bool = False, parent_model=None):
         super().__init__()
         self.head_dim = head_dim
         self.is_cross = is_cross
+        object.__setattr__(self, "parent_model", parent_model)
         self.rope = AnimaEmbedRope(head_dim)
 
     def __call__(self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, image_rotary_emb=None, img_ids=None, txt_ids=None, **kwargs):
@@ -9937,16 +10000,27 @@ class AnimaAttentionProcessor(nn.Module):
             value = value.repeat_interleave(query.shape[2] // value.shape[2], dim=2)
 
         if not self.is_cross:
+            # Retrieve dynamic coordinates from patched parent model
+            if img_ids is None and self.parent_model is not None:
+                img_ids = getattr(self.parent_model, "_current_img_ids", None)
+            if txt_ids is None and self.parent_model is not None:
+                txt_ids = getattr(self.parent_model, "_current_txt_ids", None)
+
             if image_rotary_emb is not None:
                 query = apply_rotary_emb_qwen(query, image_rotary_emb, use_real=True, use_real_unbind_dim=-2)
                 key = apply_rotary_emb_qwen(key, image_rotary_emb, use_real=True, use_real_unbind_dim=-2)
             else:
                 if img_ids is not None:
-                    query, key = self.rope(query, key, img_ids, txt_ids)
+                     query, key = self.rope(query, key, img_ids, txt_ids)
 
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
+
+        # Gated Probe C: Attention Processor Verification (Layer 0 only)
+        if os.environ.get("ANIMA_DEBUG") == "1" and getattr(self, "layer_idx", -1) == 0:
+            tag = "danima" if query.is_cuda else "oanima"
+            print(f"[{tag}] [Probe C] Layer 0 query rotated mean: {query.mean().item():.6f}", flush=True)
 
         if attention_mask is not None:
             if attention_mask.dtype not in {torch.bool, torch.float32, torch.float16, torch.bfloat16}:

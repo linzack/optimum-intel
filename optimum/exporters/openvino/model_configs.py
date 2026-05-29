@@ -3184,6 +3184,12 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
             dtype=torch.int64 if framework == "pt" else torch.float32
         )
 
+        # 6. img_ids: [sequence_length, 3] (Dummy shapes: 2 frames, 64x64 resolution -> 2048 tokens)
+        dummy_inputs["img_ids"] = torch.zeros((2048, 3), dtype=torch.int64)
+
+        # 7. txt_ids: [512, 3] (Static length text tokens)
+        dummy_inputs["txt_ids"] = torch.zeros((512, 3), dtype=torch.int64)
+
         return dummy_inputs
 
     @property
@@ -3194,6 +3200,8 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
             "encoder_hidden_states": {0: "batch_size", 1: "encoder_sequence_length", 2: "hidden_dim"},
             "attention_mask": {0: "batch_size", 1: "encoder_sequence_length"},
             "padding_mask": {2: "height", 3: "width"},
+            "img_ids": {0: "sequence_length"},
+            "txt_ids": {0: "text_sequence_length"},
         }
 
     @property

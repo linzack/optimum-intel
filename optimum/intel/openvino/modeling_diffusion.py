@@ -1483,6 +1483,26 @@ class OVModelTransformer(OVPipelinePart):
                 rope_interpolation_scale = torch.tensor(rope_interpolation_scale)
             model_inputs["rope_interpolation_scale"] = rope_interpolation_scale
 
+        # Dynamically generate img_ids to prevent Eltwise shape mismatch during OpenVINO inference
+        if "img_ids" not in model_inputs:
+            device = hidden_states.device
+            # Cosmos uses patch_size = (1, 2, 2)
+            num_frames = hidden_states.shape[2] // 1
+            height = hidden_states.shape[3] // 2
+            width = hidden_states.shape[4] // 2
+            
+            grid_t, grid_h, grid_w = torch.meshgrid(
+                torch.arange(num_frames, device=device),
+                torch.arange(height, device=device),
+                torch.arange(width, device=device),
+                indexing="ij"
+            )
+            # Reshape to [S, 3]
+            grid = torch.stack([grid_t, grid_h, grid_w], dim=-1).view(-1, 3)
+            
+            # The model expects unbatched inputs [S, 3], matching the XML dynamic shape [-1, 3] and dtype int64
+            model_inputs["img_ids"] = grid.to(dtype=torch.int64)
+
         expected_inputs = {inp.get_any_name() for inp in self.model.inputs}
         print(f"[OV forward] expected_inputs: {expected_inputs}", flush=True)
         print(f"[OV forward] kwargs keys: {list(kwargs.keys())}", flush=True)
@@ -1500,10 +1520,6 @@ class OVModelTransformer(OVPipelinePart):
         model_outputs = {}
         for key, value in ov_outputs.items():
             model_outputs[next(iter(key.names))] = torch.from_numpy(value)
-
-        # Trace and log numerical output properties
-        out_tensor = next(iter(model_outputs.values()))
-        print(f"[oanima] Transformer output shape: {out_tensor.shape} | dtype: {out_tensor.dtype} | mean: {out_tensor.mean().item():.6f} | std: {out_tensor.std().item():.6f}", flush=True)
 
         if return_dict:
             return model_outputs
