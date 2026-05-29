@@ -1894,6 +1894,14 @@ class OVModelTextConditioner(OVPipelinePart):
         **kwargs,
     ):
         self.compile()
+        print(f"[oanima] OVModelTextConditioner forward inputs:", flush=True)
+        print(f"  -> source_hidden_states shape: {source_hidden_states.shape} | dtype: {source_hidden_states.dtype}", flush=True)
+        print(f"  -> target_input_ids shape: {target_input_ids.shape} | dtype: {target_input_ids.dtype}", flush=True)
+        if target_attention_mask is not None:
+            print(f"  -> target_attention_mask shape: {target_attention_mask.shape} | dtype: {target_attention_mask.dtype}", flush=True)
+        if source_attention_mask is not None:
+            print(f"  -> source_attention_mask shape: {source_attention_mask.shape} | dtype: {source_attention_mask.dtype}", flush=True)
+
         inputs = {
             "source_hidden_states": source_hidden_states,
             "target_input_ids": target_input_ids,
@@ -1904,7 +1912,9 @@ class OVModelTextConditioner(OVPipelinePart):
             inputs["source_attention_mask"] = source_attention_mask
 
         outputs = self.request(inputs, share_inputs=True)
-        return torch.from_numpy(outputs[0])
+        output_tensor = torch.from_numpy(outputs[0])
+        print(f"[oanima] OVModelTextConditioner output shape: {output_tensor.shape} | dtype: {output_tensor.dtype} | mean: {output_tensor.mean().item():.6f}", flush=True)
+        return output_tensor
 
 
 class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaModularPipeline):
@@ -2027,16 +2037,20 @@ class OVAnimaPipeline(OVDiffusionPipeline, OVTextualInversionLoaderMixin, AnimaM
         else:
             batch_size *= num_images_per_prompt
 
-        # 2. Handle dynamic spatial dimensions to avoid -1 // 8 * -1 // 8 = 1 static lock
+        print(f"[reshape] Before reshaper fix: height={height}, width={width}, num_frames={num_frames}", flush=True)
+        # 2. Handle dynamic spatial dimensions to avoid -1 // 16 * -1 // 16 = 1 static lock
         if height == -1 or width == -1:
             packed_height_width = -1
         else:
-            height //= 8
-            width //= 8
+            # Latents are downsampled by VAE (factor of 8) and patched by transformer (factor of 2)
+            # resulting in total spatial downsampling factor of 16.
+            height //= 16
+            width //= 16
             if num_frames is None or num_frames < 0:
                 num_frames = 1
             num_frames = (num_frames - 1) // 8 + 1
             packed_height_width = height * width * num_frames
+        print(f"[reshape] After reshaper fix: packed_height_width={packed_height_width}", flush=True)
 
         shapes = {}
         for inputs in model.inputs:
