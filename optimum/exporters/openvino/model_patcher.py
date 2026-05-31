@@ -63,13 +63,16 @@ def apply_rotary_emb_qwen(
 class AnimaEmbedRope(nn.Module):
     """Implementation of 3D-RoPE for Anima/Cosmos."""
 
-    def __init__(self, head_dim: int, theta: float = 10000.0):
+    def __init__(self, head_dim: int, theta: float = 10000.0, original_rope = None):
         super().__init__()
         self.head_dim = head_dim
         self.theta = theta
         self.dim_h = (head_dim // 6) * 2
         self.dim_w = self.dim_h
         self.dim_t = head_dim - (self.dim_h + self.dim_w)
+        self.h_ntk_factor = getattr(original_rope, "h_ntk_factor", 1.0)
+        self.w_ntk_factor = getattr(original_rope, "w_ntk_factor", 1.0)
+        self.t_ntk_factor = getattr(original_rope, "t_ntk_factor", 1.0)
 
     def forward(self, q, k, img_ids, txt_ids):
         # Note: `txt_ids` is intentionally ignored. In Cosmos/Anima architecture,
@@ -77,15 +80,15 @@ class AnimaEmbedRope(nn.Module):
         # absolute embeddings applied earlier in the text encoder stream.
 
         # Correctly reconstruct [dim // 2] frequencies to support split-halves duplication
-        def get_freqs(ids, dim):
-            inv_freq = 1.0 / (self.theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=ids.device) / dim))
+        def get_freqs(ids, dim, theta_eff):
+            inv_freq = 1.0 / (theta_eff ** (torch.arange(0, dim, 2, dtype=torch.float32, device=ids.device) / dim))
             freqs = torch.einsum("...i,j->...ij", ids.float(), inv_freq)
             return freqs
 
         t_ids, h_ids, w_ids = img_ids.unbind(-1)
-        freqs_t = get_freqs(t_ids, self.dim_t)
-        freqs_h = get_freqs(h_ids, self.dim_h)
-        freqs_w = get_freqs(w_ids, self.dim_w)
+        freqs_t = get_freqs(t_ids, self.dim_t, self.theta * self.t_ntk_factor)
+        freqs_h = get_freqs(h_ids, self.dim_h, self.theta * self.h_ntk_factor)
+        freqs_w = get_freqs(w_ids, self.dim_w, self.theta * self.w_ntk_factor)
 
         # Concatenate in (T, H, W) order and duplicate as matching halves
         freqs = torch.cat((freqs_t, freqs_h, freqs_w), dim=-1)
@@ -9938,7 +9941,7 @@ class AnimaTransformerModelPatcher(ModelPatcher):
                         break
 
                 module._modules.pop("processor", None)  # Bypass PyTorch submodule type checking
-                proc = AnimaAttentionProcessor(head_dim, is_cross=is_cross, parent_model=self._model)
+                proc = AnimaAttentionProcessor(head_dim, is_cross=is_cross, parent_model=self._model, original_rope=self.original_rope)
                 proc.layer_idx = layer_idx
                 module.processor = proc
         return self
@@ -9961,12 +9964,13 @@ class AnimaTransformerModelPatcher(ModelPatcher):
 class AnimaAttentionProcessor(nn.Module):
     """Attention processor for Anima/Cosmos (handles self and cross)."""
 
-    def __init__(self, head_dim: int, is_cross: bool = False, parent_model=None):
+    def __init__(self, head_dim: int, is_cross: bool = False, parent_model=None, original_rope=None):
         super().__init__()
         self.head_dim = head_dim
         self.is_cross = is_cross
         object.__setattr__(self, "parent_model", parent_model)
-        self.rope = AnimaEmbedRope(head_dim)
+        object.__setattr__(self, "original_rope", original_rope)
+        self.rope = AnimaEmbedRope(head_dim, original_rope=original_rope)
 
     def __call__(self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, image_rotary_emb=None, img_ids=None, txt_ids=None, **kwargs):
         batch_size = hidden_states.shape[0]
@@ -9982,7 +9986,7 @@ class AnimaAttentionProcessor(nn.Module):
 
         if head_dim != self.head_dim:
             self.head_dim = head_dim
-            self.rope = AnimaEmbedRope(head_dim)
+            self.rope = AnimaEmbedRope(head_dim, original_rope=getattr(self, "original_rope", None))
 
         def reshape_heads(x):
             return x.view(batch_size, -1, heads, head_dim)
