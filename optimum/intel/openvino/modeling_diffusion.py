@@ -641,13 +641,13 @@ class OVDiffusionPipeline(OVBaseModel, DiffusionPipeline):
         # Add all custom subcomponents from the config that are not part of the hardcoded list
         # and are not OpenVINO model keys
         for key in config.keys():
-            if not key.startswith("_") and key not in submodels and key not in file_names:
-                if key != "text_conditioner":
+            if not key.startswith("_") and key not in submodels and key not in file_names and key != "vae":
+                if key != "text_conditioner" and isinstance(config[key], (list, tuple)):
                     submodels[key] = None
         for name in submodels.keys():
             if name in kwargs:
                 submodels[name] = kwargs.pop(name)
-            elif config.get(name, (None, None))[0] is not None:
+            elif isinstance(config.get(name), (list, tuple)) and config.get(name)[0] is not None:
                 val = config.get(name)
                 module_name, module_class = val[0], val[1]
                 if hasattr(pipelines, module_name):
@@ -675,7 +675,7 @@ class OVDiffusionPipeline(OVBaseModel, DiffusionPipeline):
             for ov_model_name, ov_model_path in cls._all_ov_model_paths.items()
         }
         for config_key, value in config.items():
-            if config_key not in models and config_key not in kwargs and config_key not in submodels:
+            if config_key not in models and config_key not in kwargs and config_key not in submodels and config_key != "vae":
                 kwargs[config_key] = value
 
         compile_only = kwargs.get("compile_only", False)
@@ -1437,7 +1437,7 @@ class OVModelTransformer(OVPipelinePart):
         hidden_states: torch.FloatTensor,
         encoder_hidden_states: torch.FloatTensor = None,
         pooled_projections: torch.FloatTensor = None,
-        timestep: torch.LongTensor = None,
+        timestep: torch.Tensor = None,
         img_ids: torch.Tensor = None,
         txt_ids: torch.Tensor = None,
         guidance: torch.Tensor = None,

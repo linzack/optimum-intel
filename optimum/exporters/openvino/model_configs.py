@@ -3158,10 +3158,9 @@ class AnimaTransformerOpenVINOConfig(SD3TransformerOpenVINOConfig):
         )
         
         # 2. timestep: [batch_size]
-        dummy_inputs["timestep"] = torch.randint(
-            0, 1000,
+        dummy_inputs["timestep"] = torch.rand(
             (batch_size,),
-            dtype=torch.int64 if framework == "pt" else torch.float32
+            dtype=torch.float32
         )
         
         # 3. encoder_hidden_states: [batch_size, sequence_length (512), projection_dim (1152)]
